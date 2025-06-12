@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     claude_code_max_turns: int = Field(default=10, env="CLAUDE_CODE_MAX_TURNS")
     claude_code_output_format: str = Field(default="json", env="CLAUDE_CODE_OUTPUT_FORMAT")
     claude_session_persist: bool = Field(default=True, env="CLAUDE_SESSION_PERSIST")
-    claude_session_dir: Path = Field(default=Path.home() / ".macp/claude_sessions", env="CLAUDE_SESSION_DIR")
+    claude_session_dir: Path = Field(default=Path("~/.macp/claude_sessions").expanduser(), env="CLAUDE_SESSION_DIR")
 
     # OpenAI Configuration
     openai_api_key: SecretStr = Field(..., env="OPENAI_API_KEY")
@@ -151,7 +151,7 @@ class Settings(BaseSettings):
     ui_enable_animations: bool = Field(default=True, env="UI_ENABLE_ANIMATIONS")
 
     # File System Configuration
-    workspace_dir: Path = Field(default=Path.home() / ".angelamcp/workspace", env="WORKSPACE_DIR")
+    workspace_dir: Path = Field(default=Path("~/.angelamcp/workspace").expanduser(), env="WORKSPACE_DIR")
     max_file_size: int = Field(default=10485760, env="MAX_FILE_SIZE")  # 10MB
     allowed_file_extensions: List[str] = Field(
         default=[".py", ".js", ".ts", ".java", ".cpp", ".c", ".h", ".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".sh", ".bash"],

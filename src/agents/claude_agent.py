@@ -44,7 +44,7 @@ class ClaudeCodeAgent(BaseAgent):
         
         # Claude Code configuration
         self.claude_path = Path(claude_path or settings.claude_code_path)
-        self.session_dir = Path(settings.claude_session_dir).expanduser()
+        self.session_dir = Path(settings.claude_session_dir)
         self.session_persist = settings.claude_session_persist
         self.max_turns = settings.claude_code_max_turns
         self.output_format = settings.claude_code_output_format
