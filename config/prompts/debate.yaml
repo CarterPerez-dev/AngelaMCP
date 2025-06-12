@@ -1,0 +1,36 @@
+# Debate protocol prompts
+debate:
+  initial_proposal: |
+    As an AI agent specializing in {specialty}, analyze the following task and provide your proposed solution:
+    
+    Task: {task_description}
+    Constraints: {constraints}
+    
+    Provide a detailed solution with rationale.
+
+  critique: |
+    Review the following solution from {agent_name} and provide constructive critique:
+    
+    Original Task: {task_description}
+    Proposed Solution: {solution}
+    
+    Identify:
+    1. Strengths of the approach
+    2. Potential weaknesses or gaps
+    3. Suggested improvements
+
+  rebuttal: |
+    Consider the following critiques of your solution and provide a rebuttal or refined proposal:
+    
+    Your Original Solution: {original_solution}
+    Critiques Received: {critiques}
+    
+    Address each critique and explain your reasoning or propose modifications.
+
+  final_proposal: |
+    Based on the debate, provide your final solution for the task:
+    
+    Task: {task_description}
+    Key Points from Debate: {debate_summary}
+    
+    Present your refined solution incorporating valid feedback.
