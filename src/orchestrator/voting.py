@@ -1,146 +1,145 @@
 """
-Voting System for AngelaMCP.
+Voting System for AngelaMCP multi-agent collaboration.
 
-This module implements a weighted voting system where AI agents vote on proposals
-from debates. Claude Code has senior developer voting weight and veto power since
-it's the agent with actual file system access and execution capabilities.
+This implements weighted voting with Claude veto power, consensus detection,
+and sophisticated vote aggregation. I'm creating a production-grade voting
+system that ensures quality decision-making.
 """
 
 import asyncio
 import time
 import uuid
+from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
 
-from src.agents.base import BaseAgent, AgentResponse, TaskContext, AgentType
-from src.orchestrator.debate import DebateResult, AgentProposal
-from src.utils.logger import get_logger, AsyncPerformanceLogger
+from src.agents import BaseAgent, AgentResponse, TaskContext, TaskType, AgentRole
+from src.orchestrator.debate import AgentProposal
+from src.utils import get_logger, VotingLogger, log_context, AsyncPerformanceLogger
+from src.utils import OrchestrationError
+from config import settings
 
-logger = get_logger("orchestrator.voting")
 
-
-class VoteChoice(str, Enum):
-    """Possible vote choices."""
+class VoteType(str, Enum):
+    """Types of votes agents can cast."""
     APPROVE = "approve"
     REJECT = "reject"
     ABSTAIN = "abstain"
+    VETO = "veto"  # Special vote type for Claude
+
+
+class VotingMethod(str, Enum):
+    """Different voting methods available."""
+    SIMPLE_MAJORITY = "simple_majority"
+    WEIGHTED_MAJORITY = "weighted_majority"
+    UNANIMOUS = "unanimous"
+    CLAUDE_VETO = "claude_veto"  # Default: weighted with Claude veto power
 
 
 @dataclass
 class AgentVote:
-    """A vote from an agent."""
+    """A single vote from an agent."""
     agent_name: str
     agent_type: str
-    proposal_target: str  # The agent whose proposal is being voted on
-    choice: VoteChoice
-    confidence: float = 0.5  # 0.0 to 1.0
-    reasoning: str = ""
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    vote_type: VoteType
+    confidence: float
+    reasoning: str
+    weight: float = 1.0
     metadata: Dict[str, Any] = field(default_factory=dict)
+    timestamp: datetime = field(default_factory=datetime.utcnow)
 
 
 @dataclass
 class ProposalScore:
     """Scoring for a single proposal."""
     proposal: AgentProposal
-    total_score: float = 0.0
-    weighted_score: float = 0.0
     votes: List[AgentVote] = field(default_factory=list)
+    total_weight: float = 0.0
+    weighted_score: float = 0.0
     approval_count: int = 0
     rejection_count: int = 0
     abstain_count: int = 0
-    claude_approved: bool = False
     claude_vetoed: bool = False
+    consensus_score: float = 0.0
 
 
 @dataclass
 class VotingResult:
-    """Result of the voting process."""
+    """Complete result of a voting session."""
     voting_id: str
     success: bool
     winner: Optional[str] = None
     winning_proposal: Optional[AgentProposal] = None
     proposal_scores: List[ProposalScore] = field(default_factory=list)
+    voting_method: VotingMethod = VotingMethod.CLAUDE_VETO
     total_duration: float = 0.0
     consensus_reached: bool = False
     claude_used_veto: bool = False
-    voting_summary: str = ""
+    voting_summary: Optional[str] = None
     error_message: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 class VotingSystem:
     """
-    Manages weighted voting between AI agents with Claude Code as senior developer.
+    Weighted voting system with Claude veto power.
     
-    Voting weights:
-    - Claude Code: 2.0 (senior developer with file system access)
-    - OpenAI: 1.0 (reviewer)
-    - Gemini: 1.0 (researcher)
-    
-    Special rules:
-    - Claude Code can veto any proposal (overrides all other votes)
-    - Requires majority approval to win
-    - In case of tie, Claude Code's preference wins
+    Manages vote collection, aggregation, and consensus determination.
     """
     
-    def __init__(self, claude_vote_weight: float = 2.0, enable_claude_veto: bool = True, voting_timeout: int = 120):
-        """
-        Initialize the voting system.
+    def __init__(self):
+        self.logger = get_logger("orchestrator.voting")
+        self.voting_logger = VotingLogger()
         
-        Args:
-            claude_vote_weight: Weight multiplier for Claude Code votes
-            enable_claude_veto: Whether Claude Code can veto proposals
-            voting_timeout: Timeout for voting phase in seconds
-        """
-        self.claude_vote_weight = claude_vote_weight
-        self.enable_claude_veto = enable_claude_veto
-        self.voting_timeout = voting_timeout
-        self.logger = get_logger("voting")
+        # Voting configuration from settings
+        self.claude_vote_weight = settings.claude_vote_weight
+        self.openai_vote_weight = settings.openai_vote_weight
+        self.gemini_vote_weight = settings.gemini_vote_weight
+        self.enable_claude_veto = settings.claude_veto_enabled
+        self.voting_timeout = settings.voting_timeout
         
-        # Agent vote weights
-        self.vote_weights = {
-            AgentType.CLAUDE_CODE.value: claude_vote_weight,
-            AgentType.OPENAI.value: 1.0,
-            AgentType.GEMINI.value: 1.0
+        # Agent weight mapping
+        self.agent_weights = {
+            "claude": self.claude_vote_weight,
+            "openai": self.openai_vote_weight,
+            "gemini": self.gemini_vote_weight
         }
     
     async def conduct_voting(
         self,
-        debate_result: DebateResult,
+        proposals: List[AgentProposal],
         agents: List[BaseAgent],
-        context: TaskContext
+        context: TaskContext,
+        voting_method: VotingMethod = VotingMethod.CLAUDE_VETO,
+        require_consensus: bool = False
     ) -> VotingResult:
         """
-        Conduct voting on proposals from a debate.
+        Conduct complete voting session on proposals.
         
         Args:
-            debate_result: Result from the debate phase
+            proposals: List of proposals to vote on
             agents: List of participating agents
-            context: Task context for voting
+            context: Task context
+            voting_method: Method for vote aggregation
+            require_consensus: Whether consensus is required
             
         Returns:
-            VotingResult with winner and vote breakdown
+            VotingResult with complete voting information
         """
+        
         voting_id = str(uuid.uuid4())
         start_time = time.time()
         
-        self.logger.info(f"🗳️ Starting voting {voting_id[:8]} on {len(debate_result.rounds[0].proposals)} proposals")
-        
         try:
-            async with AsyncPerformanceLogger(self.logger, "voting_full", task_id=voting_id):
-                # Get proposals from debate result
-                if not debate_result.rounds or not debate_result.rounds[0].proposals:
-                    return VotingResult(
-                        voting_id=voting_id,
-                        success=False,
-                        total_duration=time.time() - start_time,
-                        error_message="No proposals to vote on"
-                    )
+            with log_context(request_id=voting_id):
+                self.voting_logger.log_voting_start(voting_id, len(proposals))
                 
-                proposals = debate_result.rounds[0].proposals
+                if not proposals:
+                    raise OrchestrationError("No proposals to vote on")
+                
+                if not agents:
+                    raise OrchestrationError("No agents available for voting")
                 
                 # Collect votes from all agents for all proposals
                 proposal_scores = await self._collect_votes(proposals, agents, context, voting_id)
@@ -159,6 +158,7 @@ class VotingSystem:
                     winner=winner_result.proposal.agent_name if winner_result else None,
                     winning_proposal=winner_result.proposal if winner_result else None,
                     proposal_scores=proposal_scores,
+                    voting_method=voting_method,
                     total_duration=total_duration,
                     consensus_reached=self._check_consensus(proposal_scores),
                     claude_used_veto=any(score.claude_vetoed for score in proposal_scores),
@@ -170,7 +170,12 @@ class VotingSystem:
                     }
                 )
                 
-                self.logger.info(f"🏆 Voting {voting_id[:8]} completed: Winner is {result.winner or 'None'}")
+                self.voting_logger.log_voting_end(
+                    voting_id, 
+                    result.winner, 
+                    result.consensus_reached
+                )
+                
                 return result
                 
         except Exception as e:
@@ -178,6 +183,7 @@ class VotingSystem:
             return VotingResult(
                 voting_id=voting_id,
                 success=False,
+                voting_method=voting_method,
                 total_duration=time.time() - start_time,
                 error_message=str(e),
                 metadata={"error_type": type(e).__name__}
@@ -202,234 +208,272 @@ class VotingSystem:
         async def vote_on_proposal(voter_agent: BaseAgent, proposal: AgentProposal) -> List[AgentVote]:
             """Get a single agent's vote on a single proposal."""
             
-            # Don't vote on your own proposal
+            # Don't vote on own proposal (automatic approval)
             if voter_agent.name == proposal.agent_name:
-                return []
+                return [AgentVote(
+                    agent_name=voter_agent.name,
+                    agent_type=voter_agent.agent_type.value,
+                    vote_type=VoteType.APPROVE,
+                    confidence=1.0,
+                    reasoning="Author's proposal - automatic approval",
+                    weight=self.agent_weights.get(voter_agent.name.lower(), 1.0)
+                )]
             
             try:
-                self.logger.info(f"[{voting_id[:8]}] 🗳️ {voter_agent.name} voting on {proposal.agent_name}'s proposal...")
+                self.logger.info(f"[{voting_id[:8]}] 🗳️ {voter_agent.name} voting on {proposal.agent_name}'s proposal")
                 
                 # Create voting prompt
-                voting_prompt = f"""You are participating in a collaborative AI voting process. Please evaluate the following proposal and vote on it.
+                voting_prompt = f"""You are evaluating a proposal in a collaborative decision-making process.
 
-**Task Context:** {context.task_type.value if hasattr(context, 'task_type') else 'General Task'}
-
-**Proposal from {proposal.agent_name}:**
+**Proposal by {proposal.agent_name}:**
 {proposal.content}
 
-Please provide your vote and reasoning in this exact format:
+**Your Task:** Vote on this proposal with detailed reasoning.
 
-**VOTE:** [APPROVE/REJECT/ABSTAIN]
-**CONFIDENCE:** [0.0-1.0]
-**REASONING:** [Your detailed reasoning for this vote]
+**Voting Options:**
+- APPROVE: This proposal is good and should be implemented
+- REJECT: This proposal has significant issues and should not be implemented
+- ABSTAIN: You cannot make a clear decision or lack expertise in this area
+{f"- VETO: (Claude only) This proposal has critical flaws that make it dangerous" if voter_agent.name.lower() == "claude" and self.enable_claude_veto else ""}
 
-Voting guidelines:
-- APPROVE: This proposal is technically sound, practical, and well-implemented
-- REJECT: This proposal has significant issues that make it unsuitable
-- ABSTAIN: You cannot adequately evaluate this proposal or it's outside your expertise
-
-Consider:
-- Technical correctness and feasibility
-- Code quality and best practices (if applicable)
-- Completeness and thoroughness
-- Potential risks or issues
-- Overall value and effectiveness
+Please provide:
+1. **Vote:** Your decision (APPROVE/REJECT/ABSTAIN{"/VETO" if voter_agent.name.lower() == "claude" and self.enable_claude_veto else ""})
+2. **Confidence:** How confident you are (0.0-1.0)
+3. **Reasoning:** Detailed explanation of your decision
+4. **Key Factors:** What influenced your vote most
 
 Be objective and constructive in your evaluation."""
 
-                # Get vote response
+                voting_context = context.model_copy()
+                voting_context.task_type = TaskType.ANALYSIS
+                voting_context.agent_role = AgentRole.REVIEWER
+                
                 async with AsyncPerformanceLogger(
-                    self.logger, f"vote_{voter_agent.name}_on_{proposal.agent_name}", task_id=voting_id
+                    self.logger, f"vote_{voter_agent.name}_{proposal.agent_name}", 
+                    voting_id=voting_id
                 ):
                     response = await asyncio.wait_for(
-                        voter_agent.generate(voting_prompt, context),
+                        voter_agent.generate(voting_prompt, voting_context),
                         timeout=self.voting_timeout
                     )
                 
-                if response.success:
+                if response and response.content:
                     # Parse vote from response
                     vote = self._parse_vote_response(
-                        voter_agent, proposal.agent_name, response.content
+                        response.content, 
+                        voter_agent, 
+                        proposal
                     )
-                    if vote:
-                        self.logger.info(f"[{voting_id[:8]}] ✅ {voter_agent.name} voted {vote.choice.value} on {proposal.agent_name}")
-                        return [vote]
-                    else:
-                        self.logger.warning(f"[{voting_id[:8]}] ❓ Could not parse vote from {voter_agent.name}")
+                    
+                    self.voting_logger.log_vote_cast(
+                        voting_id, 
+                        voter_agent.name, 
+                        vote.vote_type.value, 
+                        vote.confidence
+                    )
+                    
+                    return [vote]
                 else:
-                    self.logger.warning(f"[{voting_id[:8]}] ❌ {voter_agent.name} voting failed: {response.error_message}")
-                
-                return []
-                
+                    self.logger.warning(f"[{voting_id[:8]}] ❌ {voter_agent.name} vote failed")
+                    return []
+                    
             except asyncio.TimeoutError:
                 self.logger.warning(f"[{voting_id[:8]}] ⏱️ {voter_agent.name} vote timed out")
                 return []
             except Exception as e:
-                self.logger.error(f"[{voting_id[:8]}] 💥 Voting error for {voter_agent.name}: {e}")
+                self.logger.error(f"[{voting_id[:8]}] 💥 Vote error for {voter_agent.name}: {e}")
                 return []
         
         # Collect all votes concurrently
-        voting_tasks = []
-        for voter_agent in agents:
-            for proposal in proposals:
-                voting_tasks.append(vote_on_proposal(voter_agent, proposal))
+        vote_tasks = []
+        for proposal in proposals:
+            for agent in agents:
+                vote_tasks.append(vote_on_proposal(agent, proposal))
         
-        # Execute all voting tasks
-        vote_results = await asyncio.gather(*voting_tasks, return_exceptions=True)
+        vote_results = await asyncio.gather(*vote_tasks, return_exceptions=True)
         
         # Organize votes by proposal
-        for i, vote_list in enumerate(vote_results):
-            if isinstance(vote_list, list) and vote_list:
-                vote = vote_list[0]
-                
-                # Find the corresponding proposal score
-                for score in proposal_scores:
-                    if score.proposal.agent_name == vote.proposal_target:
-                        score.votes.append(vote)
-                        
-                        # Update vote counts
-                        if vote.choice == VoteChoice.APPROVE:
-                            score.approval_count += 1
-                        elif vote.choice == VoteChoice.REJECT:
-                            score.rejection_count += 1
-                        else:
-                            score.abstain_count += 1
-                        
-                        # Check for Claude Code special handling
-                        if vote.agent_type == AgentType.CLAUDE_CODE.value:
-                            if vote.choice == VoteChoice.APPROVE:
-                                score.claude_approved = True
-                            elif vote.choice == VoteChoice.REJECT and self.enable_claude_veto:
-                                score.claude_vetoed = True
-                                self.logger.info(f"[{voting_id[:8]}] 🚫 Claude Code VETOED {score.proposal.agent_name}'s proposal")
-                        
-                        break
+        vote_index = 0
+        for i, proposal in enumerate(proposals):
+            for agent in agents:
+                if vote_index < len(vote_results):
+                    votes = vote_results[vote_index]
+                    if isinstance(votes, list) and votes:
+                        proposal_scores[i].votes.extend(votes)
+                vote_index += 1
         
-        # Calculate weighted scores
+        # Calculate scores for each proposal
         for score in proposal_scores:
-            total_weighted_score = 0.0
-            total_raw_score = 0.0
-            
-            for vote in score.votes:
-                vote_value = 0.0
-                if vote.choice == VoteChoice.APPROVE:
-                    vote_value = 1.0 * vote.confidence
-                elif vote.choice == VoteChoice.REJECT:
-                    vote_value = -1.0 * vote.confidence
-                # ABSTAIN = 0.0
-                
-                weight = self.vote_weights.get(vote.agent_type, 1.0)
-                total_weighted_score += vote_value * weight
-                total_raw_score += vote_value
-            
-            score.total_score = total_raw_score
-            score.weighted_score = total_weighted_score
+            self._calculate_proposal_score(score)
         
-        self.logger.info(f"[{voting_id[:8]}] 📊 Collected votes: {sum(len(s.votes) for s in proposal_scores)} total votes")
         return proposal_scores
     
-    def _parse_vote_response(self, voter_agent: BaseAgent, proposal_target: str, response_content: str) -> Optional[AgentVote]:
-        """Parse vote information from agent response."""
-        try:
-            lines = response_content.strip().split('\n')
-            
-            vote_choice = None
-            confidence = 0.5
-            reasoning = ""
-            
-            for line in lines:
-                line = line.strip()
-                if line.startswith("**VOTE:**"):
-                    vote_text = line.replace("**VOTE:**", "").strip().upper()
-                    if "APPROVE" in vote_text:
-                        vote_choice = VoteChoice.APPROVE
-                    elif "REJECT" in vote_text:
-                        vote_choice = VoteChoice.REJECT
-                    elif "ABSTAIN" in vote_text:
-                        vote_choice = VoteChoice.ABSTAIN
-                
-                elif line.startswith("**CONFIDENCE:**"):
-                    conf_text = line.replace("**CONFIDENCE:**", "").strip()
-                    try:
-                        confidence = float(conf_text)
-                        confidence = max(0.0, min(1.0, confidence))  
-                    except ValueError:
-                        confidence = 0.5
-                
-                elif line.startswith("**REASONING:**"):
-                    reasoning = line.replace("**REASONING:**", "").strip()
-            
-            if not reasoning:
-                reasoning_start = response_content.find("**REASONING:**")
-                if reasoning_start != -1:
-                    reasoning = response_content[reasoning_start + len("**REASONING:") :].strip()
-            
-            if vote_choice:
-                return AgentVote(
-                    agent_name=voter_agent.name,
-                    agent_type=voter_agent.agent_type.value,
-                    proposal_target=proposal_target,
-                    choice=vote_choice,
-                    confidence=confidence,
-                    reasoning=reasoning or "No reasoning provided"
-                )
-            
-            return None
-            
-        except Exception as e:
-            self.logger.error(f"Error parsing vote response: {e}")
-            return None
+    def _parse_vote_response(
+        self, 
+        response_content: str, 
+        voter_agent: BaseAgent, 
+        proposal: AgentProposal
+    ) -> AgentVote:
+        """Parse vote response from agent."""
+        
+        response_lower = response_content.lower()
+        
+        # Determine vote type
+        vote_type = VoteType.ABSTAIN  # Default
+        
+        if "veto" in response_lower and voter_agent.name.lower() == "claude" and self.enable_claude_veto:
+            vote_type = VoteType.VETO
+        elif "approve" in response_lower or "support" in response_lower or "yes" in response_lower:
+            vote_type = VoteType.APPROVE
+        elif "reject" in response_lower or "oppose" in response_lower or "no" in response_lower:
+            vote_type = VoteType.REJECT
+        elif "abstain" in response_lower:
+            vote_type = VoteType.ABSTAIN
+        
+        # Extract confidence (look for numbers between 0 and 1)
+        confidence = 0.8  # Default
+        import re
+        
+        # Look for confidence patterns
+        confidence_patterns = [
+            r"confidence[:\s]*([0-9]*\.?[0-9]+)",
+            r"([0-9]*\.?[0-9]+)\s*confidence",
+            r"([0-9]*\.?[0-9]+)/10",
+            r"([0-9]*\.?[0-9]+)%"
+        ]
+        
+        for pattern in confidence_patterns:
+            match = re.search(pattern, response_lower)
+            if match:
+                try:
+                    val = float(match.group(1))
+                    if val <= 1.0:
+                        confidence = val
+                    elif val <= 10.0:
+                        confidence = val / 10.0
+                    elif val <= 100.0:
+                        confidence = val / 100.0
+                    break
+                except ValueError:
+                    pass
+        
+        # Get weight for this agent
+        weight = self.agent_weights.get(voter_agent.name.lower(), 1.0)
+        
+        return AgentVote(
+            agent_name=voter_agent.name,
+            agent_type=voter_agent.agent_type.value,
+            vote_type=vote_type,
+            confidence=confidence,
+            reasoning=response_content,
+            weight=weight
+        )
     
-    def _determine_winner(self, proposal_scores: List[ProposalScore], voting_id: str) -> Optional[ProposalScore]:
-        """Determine the winning proposal based on votes and weights."""
+    def _calculate_proposal_score(self, proposal_score: ProposalScore) -> None:
+        """Calculate weighted score for a proposal."""
+        
+        total_weight = 0.0
+        weighted_score = 0.0
+        approval_count = 0
+        rejection_count = 0
+        abstain_count = 0
+        claude_vetoed = False
+        
+        for vote in proposal_score.votes:
+            total_weight += vote.weight
+            
+            if vote.vote_type == VoteType.APPROVE:
+                weighted_score += vote.weight * vote.confidence
+                approval_count += 1
+            elif vote.vote_type == VoteType.REJECT:
+                weighted_score -= vote.weight * vote.confidence
+                rejection_count += 1
+            elif vote.vote_type == VoteType.ABSTAIN:
+                abstain_count += 1
+            elif vote.vote_type == VoteType.VETO:
+                claude_vetoed = True
+                weighted_score = -float('inf')  # Veto overrides everything
+        
+        # Normalize score by total weight
+        if total_weight > 0 and not claude_vetoed:
+            weighted_score = weighted_score / total_weight
+        
+        # Calculate consensus score (agreement level)
+        if proposal_score.votes:
+            dominant_vote_count = max(approval_count, rejection_count, abstain_count)
+            consensus_score = dominant_vote_count / len(proposal_score.votes)
+        else:
+            consensus_score = 0.0
+        
+        # Update proposal score
+        proposal_score.total_weight = total_weight
+        proposal_score.weighted_score = weighted_score
+        proposal_score.approval_count = approval_count
+        proposal_score.rejection_count = rejection_count
+        proposal_score.abstain_count = abstain_count
+        proposal_score.claude_vetoed = claude_vetoed
+        proposal_score.consensus_score = consensus_score
+    
+    def _determine_winner(
+        self, 
+        proposal_scores: List[ProposalScore], 
+        voting_id: str
+    ) -> Optional[ProposalScore]:
+        """Determine the winning proposal."""
         
         if not proposal_scores:
             return None
         
-        # First, eliminate any Claude-vetoed proposals
+        # Filter out vetoed proposals
         valid_proposals = [
-            score for score in proposal_scores
+            score for score in proposal_scores 
             if not score.claude_vetoed
         ]
         
         if not valid_proposals:
-            self.logger.info(f"[{voting_id[:8]}] ❌ All proposals were vetoed by Claude Code")
+            self.logger.info(f"[{voting_id[:8]}] 🚫 All proposals vetoed by Claude")
             return None
         
-        # Sort by weighted score (highest first)
-        valid_proposals.sort(key=lambda x: x.weighted_score, reverse=True)
+        # Find proposal with highest weighted score
+        winner = max(valid_proposals, key=lambda x: x.weighted_score)
         
-        # Check if we have a clear winner
-        winner = valid_proposals[0]
-        
-        # Must have positive weighted score to win
+        # Require positive score for approval
         if winner.weighted_score <= 0:
-            self.logger.info(f"[{voting_id[:8]}] ❌ No proposal received positive approval")
+            self.logger.info(f"[{voting_id[:8]}] 🚫 No proposal received positive approval")
             return None
         
-        self.logger.info(f"[{voting_id[:8]}] 🏆 Winner: {winner.proposal.agent_name} (score: {winner.weighted_score:.2f})")
+        self.logger.info(
+            f"[{voting_id[:8]}] 🏆 Winner: {winner.proposal.agent_name} "
+            f"(score: {winner.weighted_score:.2f})"
+        )
+        
         return winner
     
     def _check_consensus(self, proposal_scores: List[ProposalScore]) -> bool:
-        """Check if there's strong consensus in the voting."""
+        """Check if consensus was reached."""
+        
         if not proposal_scores:
             return False
         
-        # Sort by weighted score
-        sorted_scores = sorted(proposal_scores, key=lambda x: x.weighted_score, reverse=True)
+        # Find highest scoring proposal
+        best_score = max(proposal_scores, key=lambda x: x.weighted_score)
         
-        if len(sorted_scores) < 2:
-            return True
+        # Check if consensus score is high enough
+        consensus_threshold = 0.7  # 70% agreement
         
-        # Check if winner has significantly higher score than second place
-        winner_score = sorted_scores[0].weighted_score
-        second_score = sorted_scores[1].weighted_score
-        
-        # Consider consensus if winner has at least 2x the score of second place
-        return winner_score > 0 and (second_score <= 0 or winner_score >= 2 * second_score)
+        return (
+            best_score.weighted_score > 0 and 
+            best_score.consensus_score >= consensus_threshold and
+            not best_score.claude_vetoed
+        )
     
-    def _create_voting_summary(self, proposal_scores: List[ProposalScore], winner: Optional[ProposalScore]) -> str:
-        """Create a human-readable voting summary."""
+    def _create_voting_summary(
+        self, 
+        proposal_scores: List[ProposalScore], 
+        winner: Optional[ProposalScore]
+    ) -> str:
+        """Create human-readable voting summary."""
+        
         if not proposal_scores:
             return "No proposals to vote on."
         
@@ -456,6 +500,30 @@ Be objective and constructive in your evaluation."""
             summary_lines.append(f"\n**Final Decision:** No solution reached consensus")
         
         return "\n".join(summary_lines)
+    
+    async def quick_approval_vote(
+        self,
+        proposal: AgentProposal,
+        agents: List[BaseAgent],
+        context: TaskContext
+    ) -> bool:
+        """Quick yes/no approval vote on a single proposal."""
+        
+        voting_result = await self.conduct_voting(
+            [proposal], agents, context, 
+            voting_method=VotingMethod.WEIGHTED_MAJORITY
+        )
+        
+        return voting_result.success and voting_result.winner is not None
+    
+    def get_agent_weight(self, agent_name: str) -> float:
+        """Get voting weight for an agent."""
+        return self.agent_weights.get(agent_name.lower(), 1.0)
+    
+    def set_agent_weight(self, agent_name: str, weight: float) -> None:
+        """Set voting weight for an agent."""
+        self.agent_weights[agent_name.lower()] = weight
+        self.logger.info(f"Updated {agent_name} vote weight to {weight}")
 
 
 class VotingError(Exception):

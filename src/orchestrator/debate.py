@@ -1,447 +1,673 @@
 """
-Debate Protocol for AngelaMCP.
+Debate Protocol for AngelaMCP multi-agent collaboration.
 
-This module implements structured debates between AI agents where they can
-propose solutions, critique each other's work, and reach consensus through
-voting. I'm implementing a simple but effective debate flow focusing on
-the core collaborative experience.
+This implements structured debate between AI agents with proper rounds,
+critiques, and consensus building. I'm creating a production-grade
+debate system that ensures quality collaboration.
 """
 
 import asyncio
 import time
 import uuid
+from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional, Any, Set
 from datetime import datetime
 
-from src.agents.base import BaseAgent, AgentResponse, TaskContext, TaskType, AgentType
-from src.utils.logger import get_logger, AsyncPerformanceLogger
-
-logger = get_logger("orchestrator.debate")
+from src.agents import BaseAgent, AgentResponse, TaskContext, TaskType, AgentRole
+from src.utils import get_logger, DebateLogger, log_context, AsyncPerformanceLogger
+from src.utils import OrchestrationError
+from config import settings
 
 
 class DebatePhase(str, Enum):
     """Phases of the debate process."""
     INITIALIZATION = "initialization"
-    PROPOSALS = "proposals"
+    PROPOSAL = "proposal"
     CRITIQUE = "critique"
     REBUTTAL = "rebuttal"
-    FINAL_PROPOSALS = "final_proposals"
-    VOTING = "voting"
+    REFINEMENT = "refinement"
+    CONSENSUS = "consensus"
     COMPLETED = "completed"
-    FAILED = "failed"
 
 
 @dataclass
 class AgentProposal:
-    """A proposal from an agent."""
+    """A proposal from an agent in the debate."""
     agent_type: str
     agent_name: str
     content: str
-    timestamp: datetime = field(default_factory=datetime.utcnow)
     confidence_score: Optional[float] = None
+    reasoning: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    timestamp: datetime = field(default_factory=datetime.utcnow)
 
 
 @dataclass
 class AgentCritique:
     """A critique of another agent's proposal."""
     critic_agent: str
-    target_proposal: str  # agent_type of the proposal being critiqued
-    content: str
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    target_proposal: AgentProposal
+    critique_content: str
+    suggestions: List[str] = field(default_factory=list)
     severity: str = "moderate"  # low, moderate, high
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    confidence: float = 0.8
+    timestamp: datetime = field(default_factory=datetime.utcnow)
 
 
 @dataclass
 class DebateRound:
-    """Information about a single debate round."""
+    """Single round of debate with all phases."""
     round_number: int
     phase: DebatePhase
-    started_at: datetime
-    completed_at: Optional[datetime] = None
     proposals: List[AgentProposal] = field(default_factory=list)
     critiques: List[AgentCritique] = field(default_factory=list)
-    phase_duration: Optional[float] = None
+    rebuttals: List[AgentProposal] = field(default_factory=list)
+    round_summary: Optional[str] = None
+    duration_seconds: float = 0.0
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
 
 
 @dataclass
 class DebateResult:
-    """Final result of a debate."""
+    """Complete result of a debate session."""
     debate_id: str
     topic: str
     success: bool
-    winner: Optional[str] = None
-    winning_proposal: Optional[AgentProposal] = None
-    total_duration: float = 0.0
     rounds: List[DebateRound] = field(default_factory=list)
+    final_consensus: Optional[str] = None
+    consensus_score: float = 0.0
     participating_agents: List[str] = field(default_factory=list)
-    consensus_reached: bool = False
-    vote_breakdown: Dict[str, Any] = field(default_factory=dict)
+    rounds_completed: int = 0
+    total_duration: float = 0.0
+    summary: Optional[str] = None
+    participant_votes: Dict[str, Any] = field(default_factory=dict)
     error_message: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 class DebateProtocol:
     """
-    Manages structured debates between AI agents.
+    Structured debate protocol for multi-agent collaboration.
     
-    I'm implementing a collaborative debate system where agents propose solutions,
-    critique each other's work, provide rebuttals, and reach consensus through voting.
-    The focus is on creating engaging, productive multi-agent interactions.
+    Manages the entire debate lifecycle from proposal to consensus.
     """
     
-    def __init__(self, timeout_per_phase: int = 120, max_rounds: int = 3):
-        """
-        Initialize the debate protocol.
+    def __init__(self):
+        self.logger = get_logger("orchestrator.debate")
+        self.debate_logger = DebateLogger()
+        self.max_rounds = settings.debate_max_rounds
+        self.timeout_per_phase = settings.debate_timeout
+        self.min_participants = settings.debate_min_participants
         
-        Args:
-            timeout_per_phase: Maximum time per debate phase in seconds
-            max_rounds: Maximum number of debate rounds
-        """
-        self.timeout_per_phase = timeout_per_phase
-        self.max_rounds = max_rounds
-        self.logger = get_logger("debate")
-        
-        # Track active debates
-        self._active_debates: Dict[str, Dict[str, Any]] = {}
+        # Active debates tracking
+        self._active_debates: Dict[str, DebateResult] = {}
     
     async def conduct_debate(
         self,
         topic: str,
         agents: List[BaseAgent],
         context: TaskContext,
-        require_all_agents: bool = False
+        max_rounds: Optional[int] = None,
+        require_consensus: bool = True
     ) -> DebateResult:
         """
-        Conduct a structured debate between agents.
+        Conduct a complete structured debate between agents.
         
         Args:
-            topic: The topic/task for agents to debate
+            topic: The topic to debate
             agents: List of participating agents
             context: Task context for the debate
-            require_all_agents: Whether all agents must participate successfully
+            max_rounds: Maximum rounds (overrides default)
+            require_consensus: Whether consensus is required
             
         Returns:
-            DebateResult with complete debate transcript and outcome
+            DebateResult with complete debate information
         """
+        
         debate_id = str(uuid.uuid4())
         start_time = time.time()
         
         # Initialize debate tracking
-        debate_info = {
-            "debate_id": debate_id,
-            "topic": topic,
-            "agents": {agent.name: agent for agent in agents},
-            "start_time": start_time,
-            "current_phase": DebatePhase.INITIALIZATION
-        }
-        self._active_debates[debate_id] = debate_info
+        debate_result = DebateResult(
+            debate_id=debate_id,
+            topic=topic,
+            success=False,
+            participating_agents=[agent.name for agent in agents]
+        )
         
-        self.logger.info(f"🎪 Starting debate {debate_id[:8]} on: {topic[:60]}...")
+        self._active_debates[debate_id] = debate_result
         
         try:
-            async with AsyncPerformanceLogger(self.logger, "debate_full", task_id=debate_id):
-                # Phase 1: Initial Proposals
-                self.logger.info(f"[{debate_id[:8]}] 💡 Phase 1: Getting proposals from all agents")
-                proposals = await self._phase_initial_proposals(topic, agents, context, debate_id)
+            with log_context(request_id=debate_id):
+                self.debate_logger.log_debate_start(debate_id, topic, [a.name for a in agents])
                 
-                if not proposals and require_all_agents:
-                    raise DebateError("Failed to get initial proposals from all agents")
+                # Validate participants
+                if len(agents) < self.min_participants:
+                    raise OrchestrationError(f"Need at least {self.min_participants} agents for debate")
                 
-                if not proposals:
-                    self.logger.warning(f"[{debate_id[:8]}] No proposals received - ending debate")
-                    return DebateResult(
-                        debate_id=debate_id,
-                        topic=topic,
-                        success=False,
-                        total_duration=time.time() - start_time,
-                        participating_agents=[agent.name for agent in agents],
-                        error_message="No proposals received from any agent"
+                # Set rounds limit
+                rounds_limit = max_rounds or self.max_rounds
+                
+                # Main debate loop
+                for round_num in range(1, rounds_limit + 1):
+                    self.debate_logger.log_debate_round(debate_id, round_num, "starting")
+                    
+                    round_result = await self._conduct_debate_round(
+                        debate_id, round_num, topic, agents, context
                     )
+                    
+                    debate_result.rounds.append(round_result)
+                    debate_result.rounds_completed = round_num
+                    
+                    # Check for early consensus
+                    if require_consensus:
+                        consensus_score = await self._evaluate_consensus(round_result.proposals)
+                        debate_result.consensus_score = consensus_score
+                        
+                        if consensus_score >= 0.8:  # High consensus threshold
+                            self.logger.info(f"Early consensus reached in round {round_num} (score: {consensus_score:.2f})")
+                            break
                 
-                # Phase 2: Critique Round
-                self.logger.info(f"[{debate_id[:8]}] 🔍 Phase 2: Agents critiquing each other's work")
-                critiques = await self._phase_critique_round(proposals, agents, context, debate_id)
-                
-                # Phase 3: Final Proposals (agents refine based on feedback)
-                self.logger.info(f"[{debate_id[:8]}] ✨ Phase 3: Refined proposals based on feedback")
-                final_proposals = await self._phase_final_proposals(
-                    topic, proposals, critiques, agents, context, debate_id
+                # Generate final consensus
+                debate_result.final_consensus = await self._generate_final_consensus(
+                    debate_result.rounds, agents, context
                 )
                 
-                # Calculate total duration
-                total_duration = time.time() - start_time
+                # Calculate final consensus score
+                if debate_result.rounds:
+                    final_proposals = debate_result.rounds[-1].proposals
+                    debate_result.consensus_score = await self._evaluate_consensus(final_proposals)
                 
-                # Create debate result with all the data needed for voting
-                result = DebateResult(
-                    debate_id=debate_id,
-                    topic=topic,
-                    success=len(final_proposals) > 0,
-                    total_duration=total_duration,
-                    participating_agents=[agent.name for agent in agents],
-                    metadata={
-                        "initial_proposals": len(proposals),
-                        "critiques_generated": len(critiques),
-                        "final_proposals": len(final_proposals),
-                        "context": context.model_dump() if hasattr(context, 'model_dump') else {}
-                    }
+                # Generate debate summary
+                debate_result.summary = await self._generate_debate_summary(debate_result)
+                
+                debate_result.success = True
+                debate_result.total_duration = time.time() - start_time
+                
+                self.debate_logger.log_debate_end(
+                    debate_id, 
+                    True, 
+                    debate_result.consensus_score
                 )
                 
-                # Store proposals for voting
-                result.rounds = [
-                    DebateRound(
-                        round_number=1,
-                        phase=DebatePhase.PROPOSALS,
-                        started_at=datetime.utcnow(),
-                        proposals=[
-                            AgentProposal(
-                                agent_type=agent.agent_type.value,
-                                agent_name=agent.name,
-                                content=prop_content,
-                                confidence_score=getattr(prop_response, 'confidence_score', None),
-                                metadata=prop_response.metadata if hasattr(prop_response, 'metadata') else {}
-                            )
-                            for agent, prop_response, prop_content in final_proposals
-                        ]
-                    )
-                ]
-                
-                self.logger.info(f"🎉 Debate {debate_id[:8]} completed in {total_duration:.1f}s with {len(final_proposals)} proposals")
-                return result
+                return debate_result
                 
         except Exception as e:
-            total_duration = time.time() - start_time
-            self.logger.error(f"❌ Debate {debate_id[:8]} failed: {e}")
+            self.logger.error(f"Debate {debate_id[:8]} failed: {e}")
             
-            return DebateResult(
-                debate_id=debate_id,
-                topic=topic,
-                success=False,
-                total_duration=total_duration,
-                participating_agents=[agent.name for agent in agents],
-                error_message=str(e),
-                metadata={"error_type": type(e).__name__}
-            )
-        
+            debate_result.success = False
+            debate_result.error_message = str(e)
+            debate_result.total_duration = time.time() - start_time
+            
+            self.debate_logger.log_debate_end(debate_id, False, 0.0)
+            
+            return debate_result
+            
         finally:
             # Cleanup
             if debate_id in self._active_debates:
                 del self._active_debates[debate_id]
     
-    async def _phase_initial_proposals(
+    async def _conduct_debate_round(
+        self,
+        debate_id: str,
+        round_number: int,
+        topic: str,
+        agents: List[BaseAgent],
+        context: TaskContext
+    ) -> DebateRound:
+        """Conduct a single round of debate."""
+        
+        round_start = time.time()
+        debate_round = DebateRound(
+            round_number=round_number,
+            phase=DebatePhase.INITIALIZATION,
+            started_at=datetime.utcnow()
+        )
+        
+        try:
+            # Phase 1: Initial Proposals
+            self.debate_logger.log_debate_round(debate_id, round_number, "proposals")
+            debate_round.phase = DebatePhase.PROPOSAL
+            
+            initial_proposals = await self._gather_initial_proposals(
+                topic, agents, context, debate_id, round_number
+            )
+            debate_round.proposals = initial_proposals
+            
+            # Phase 2: Cross-Critiques
+            if len(initial_proposals) > 1:  # Only critique if multiple proposals
+                self.debate_logger.log_debate_round(debate_id, round_number, "critiques")
+                debate_round.phase = DebatePhase.CRITIQUE
+                
+                critiques = await self._gather_critiques(
+                    initial_proposals, agents, context, debate_id, round_number
+                )
+                debate_round.critiques = critiques
+                
+                # Phase 3: Rebuttals and Refinements
+                if critiques:  # Only if there are critiques to address
+                    self.debate_logger.log_debate_round(debate_id, round_number, "refinement")
+                    debate_round.phase = DebatePhase.REFINEMENT
+                    
+                    refined_proposals = await self._gather_refined_proposals(
+                        initial_proposals, critiques, agents, context, debate_id
+                    )
+                    
+                    # Update proposals with refined versions
+                    debate_round.proposals = refined_proposals if refined_proposals else initial_proposals
+            
+            # Generate round summary
+            debate_round.round_summary = await self._generate_round_summary(debate_round)
+            
+            debate_round.phase = DebatePhase.COMPLETED
+            debate_round.completed_at = datetime.utcnow()
+            debate_round.duration_seconds = time.time() - round_start
+            
+            return debate_round
+            
+        except Exception as e:
+            self.logger.error(f"Round {round_number} failed: {e}")
+            debate_round.phase = DebatePhase.COMPLETED
+            debate_round.duration_seconds = time.time() - round_start
+            raise
+    
+    async def _gather_initial_proposals(
         self,
         topic: str,
         agents: List[BaseAgent],
         context: TaskContext,
-        debate_id: str
-    ) -> List[tuple]:
-        """Phase 1: Each agent proposes their solution."""
+        debate_id: str,
+        round_number: int
+    ) -> List[AgentProposal]:
+        """Gather initial proposals from all agents."""
         
         proposals = []
         
-        # Get proposals from all agents in parallel
-        async def get_agent_proposal(agent: BaseAgent) -> Optional[tuple]:
+        async def get_agent_proposal(agent: BaseAgent) -> Optional[AgentProposal]:
+            """Get proposal from a single agent."""
             try:
-                self.logger.info(f"[{debate_id[:8]}] 🤖 Getting proposal from {agent.name}...")
+                self.logger.info(f"[{debate_id[:8]}] 📝 Getting proposal from {agent.name}")
+                
+                proposal_prompt = f"""You are participating in a structured debate on the following topic:
+
+**Topic:** {topic}
+
+**Your Role:** Provide your best solution/proposal for this topic.
+
+Please provide:
+1. **Your Proposal:** Clear, actionable solution
+2. **Reasoning:** Why this is the best approach
+3. **Key Benefits:** Main advantages of your proposal
+4. **Potential Concerns:** Any limitations you acknowledge
+
+This is round {round_number} of the debate. Be thorough but concise."""
+
+                proposal_context = context.model_copy()
+                proposal_context.task_type = TaskType.DEBATE
+                proposal_context.agent_role = AgentRole.PROPOSER
                 
                 async with AsyncPerformanceLogger(
-                    self.logger, f"proposal_{agent.name}", task_id=debate_id
+                    self.logger, f"proposal_{agent.name}", debate_id=debate_id, round=round_number
                 ):
                     response = await asyncio.wait_for(
-                        agent.propose_solution(topic, [], context),
+                        agent.generate(proposal_prompt, proposal_context),
                         timeout=self.timeout_per_phase
                     )
+                
+                if response and response.content:
+                    self.logger.info(f"[{debate_id[:8]}] ✅ {agent.name} proposal ready")
+                    return AgentProposal(
+                        agent_type=agent.agent_type.value,
+                        agent_name=agent.name,
+                        content=response.content,
+                        confidence_score=getattr(response, 'confidence', 0.8),
+                        metadata=getattr(response, 'metadata', {})
+                    )
+                else:
+                    self.logger.warning(f"[{debate_id[:8]}] ❌ {agent.name} proposal failed")
+                    return None
                     
-                    if response.success:
-                        self.logger.info(f"[{debate_id[:8]}] ✅ {agent.name} proposal received ({len(response.content)} chars)")
-                        return (agent, response, response.content)
-                    else:
-                        self.logger.warning(f"[{debate_id[:8]}] ❌ {agent.name} proposal failed: {response.error_message}")
-                        return None
-                        
             except asyncio.TimeoutError:
-                self.logger.warning(f"[{debate_id[:8]}] ⏱️ {agent.name} proposal timed out after {self.timeout_per_phase}s")
+                self.logger.warning(f"[{debate_id[:8]}] ⏱️ {agent.name} proposal timed out")
                 return None
             except Exception as e:
-                self.logger.error(f"[{debate_id[:8]}] 💥 {agent.name} proposal error: {e}")
+                self.logger.error(f"[{debate_id[:8]}] 💥 Proposal error for {agent.name}: {e}")
                 return None
         
-        # Execute all proposals concurrently
+        # Gather proposals concurrently
         proposal_tasks = [get_agent_proposal(agent) for agent in agents]
         proposal_results = await asyncio.gather(*proposal_tasks, return_exceptions=True)
         
-        # Filter out failed proposals
+        # Filter successful proposals
         for result in proposal_results:
             if result and not isinstance(result, Exception):
                 proposals.append(result)
         
-        self.logger.info(f"[{debate_id[:8]}] 📊 Collected {len(proposals)}/{len(agents)} proposals")
+        self.logger.info(f"[{debate_id[:8]}] 📋 Gathered {len(proposals)} proposals")
         return proposals
     
-    async def _phase_critique_round(
+    async def _gather_critiques(
         self,
-        proposals: List[tuple],
+        proposals: List[AgentProposal],
         agents: List[BaseAgent],
         context: TaskContext,
-        debate_id: str
+        debate_id: str,
+        round_number: int
     ) -> List[AgentCritique]:
-        """Phase 2: Each agent critiques other agents' proposals."""
+        """Gather critiques of proposals from agents."""
         
         critiques = []
         
-        # Create critique tasks for each agent to review each other agent's proposals
-        async def generate_critique(critic_agent: BaseAgent, target_proposal: tuple) -> Optional[AgentCritique]:
-            target_agent, target_response, target_content = target_proposal
+        async def get_agent_critiques(agent: BaseAgent) -> List[AgentCritique]:
+            """Get critiques from a single agent on all other proposals."""
+            agent_critiques = []
             
-            # Don't critique your own proposal
-            if critic_agent.name == target_agent.name:
-                return None
+            # Critique each proposal not from this agent
+            other_proposals = [p for p in proposals if p.agent_name != agent.name]
             
-            try:
-                self.logger.info(f"[{debate_id[:8]}] 🔍 {critic_agent.name} reviewing {target_agent.name}'s work...")
-                
-                async with AsyncPerformanceLogger(
-                    self.logger, f"critique_{critic_agent.name}_vs_{target_agent.name}", task_id=debate_id
-                ):
-                    critique_response = await asyncio.wait_for(
-                        critic_agent.critique(target_content, f"Solution from {target_agent.name}", context),
-                        timeout=self.timeout_per_phase
-                    )
+            for proposal in other_proposals:
+                try:
+                    self.logger.info(f"[{debate_id[:8]}] 🔍 {agent.name} critiquing {proposal.agent_name}'s proposal")
                     
-                    if critique_response.success:
-                        self.logger.info(f"[{debate_id[:8]}] ✅ {critic_agent.name} critique of {target_agent.name} complete")
-                        return AgentCritique(
-                            critic_agent=critic_agent.name,
-                            target_proposal=target_agent.name,
-                            content=critique_response.content,
-                            metadata=critique_response.metadata if hasattr(critique_response, 'metadata') else {}
+                    critique_prompt = f"""You are reviewing a colleague's proposal in a collaborative debate.
+
+**Original Topic:** {context.metadata.get('topic', 'Not specified')}
+
+**Proposal to Review (by {proposal.agent_name}):**
+{proposal.content}
+
+**Your Task:** Provide constructive criticism to improve this proposal.
+
+Please provide:
+1. **Strengths:** What's good about this proposal
+2. **Weaknesses:** Areas that could be improved
+3. **Specific Suggestions:** Concrete ways to enhance the proposal
+4. **Concerns:** Any risks or issues you see
+
+Be constructive and professional. The goal is to improve the solution, not to attack."""
+
+                    critique_context = context.model_copy()
+                    critique_context.task_type = TaskType.DEBATE
+                    critique_context.agent_role = AgentRole.CRITIC
+                    
+                    async with AsyncPerformanceLogger(
+                        self.logger, f"critique_{agent.name}_{proposal.agent_name}", 
+                        debate_id=debate_id, round=round_number
+                    ):
+                        response = await asyncio.wait_for(
+                            agent.generate(critique_prompt, critique_context),
+                            timeout=self.timeout_per_phase
                         )
-                    else:
-                        self.logger.warning(
-                            f"[{debate_id[:8]}] ❌ {critic_agent.name} critique of {target_agent.name} failed"
+                    
+                    if response and response.content:
+                        critique = AgentCritique(
+                            critic_agent=agent.name,
+                            target_proposal=proposal,
+                            critique_content=response.content,
+                            confidence=getattr(response, 'confidence', 0.8)
                         )
-                        return None
-                        
-            except asyncio.TimeoutError:
-                self.logger.warning(f"[{debate_id[:8]}] ⏱️ {critic_agent.name} critique timed out")
-                return None
-            except Exception as e:
-                self.logger.error(f"[{debate_id[:8]}] 💥 Critique error: {e}")
-                return None
+                        agent_critiques.append(critique)
+                        self.logger.info(f"[{debate_id[:8]}] ✅ {agent.name} critique of {proposal.agent_name} ready")
+                    
+                except asyncio.TimeoutError:
+                    self.logger.warning(f"[{debate_id[:8]}] ⏱️ {agent.name} critique of {proposal.agent_name} timed out")
+                except Exception as e:
+                    self.logger.error(f"[{debate_id[:8]}] 💥 Critique error: {e}")
+            
+            return agent_critiques
         
-        # Generate all critique tasks
-        critique_tasks = []
-        for critic_agent in agents:
-            for target_proposal in proposals:
-                critique_tasks.append(generate_critique(critic_agent, target_proposal))
-        
-        # Execute critiques concurrently
+        # Gather critiques concurrently
+        critique_tasks = [get_agent_critiques(agent) for agent in agents]
         critique_results = await asyncio.gather(*critique_tasks, return_exceptions=True)
         
-        # Filter successful critiques
+        # Flatten results
         for result in critique_results:
-            if result and not isinstance(result, Exception):
-                critiques.append(result)
+            if isinstance(result, list):
+                critiques.extend(result)
         
-        self.logger.info(f"[{debate_id[:8]}] 📝 Generated {len(critiques)} critiques")
+        self.logger.info(f"[{debate_id[:8]}] 📝 Gathered {len(critiques)} critiques")
         return critiques
     
-    async def _phase_final_proposals(
+    async def _gather_refined_proposals(
         self,
-        topic: str,
-        initial_proposals: List[tuple],
+        original_proposals: List[AgentProposal],
         critiques: List[AgentCritique],
         agents: List[BaseAgent],
         context: TaskContext,
         debate_id: str
-    ) -> List[tuple]:
-        """Phase 3: Agents refine their proposals based on critiques."""
+    ) -> List[AgentProposal]:
+        """Gather refined proposals based on critiques."""
         
-        final_proposals = []
+        refined_proposals = []
         
-        async def generate_final_proposal(agent: BaseAgent) -> Optional[tuple]:
+        async def refine_agent_proposal(agent: BaseAgent) -> Optional[AgentProposal]:
+            """Refine a single agent's proposal based on critiques."""
             try:
-                # Find critiques of this agent's proposal
-                agent_critiques = [
+                # Find original proposal and relevant critiques
+                original_proposal = next(
+                    (p for p in original_proposals if p.agent_name == agent.name),
+                    None
+                )
+                
+                if not original_proposal:
+                    return None
+                
+                # Find critiques for this agent's proposal
+                relevant_critiques = [
                     c for c in critiques 
-                    if c.target_proposal == agent.name
+                    if c.target_proposal.agent_name == agent.name
                 ]
                 
-                if agent_critiques:
-                    self.logger.info(f"[{debate_id[:8]}] 🔄 {agent.name} refining based on {len(agent_critiques)} critiques...")
+                if relevant_critiques:
+                    self.logger.info(f"[{debate_id[:8]}] 🔧 {agent.name} refining proposal based on {len(relevant_critiques)} critiques")
                     
-                    # Create prompt incorporating feedback
-                    critique_text = "\n\n".join([
-                        f"**Feedback from {c.critic_agent}:**\n{c.content}"
-                        for c in agent_critiques
+                    # Build refinement prompt
+                    critiques_text = "\n\n".join([
+                        f"**Critique from {c.critic_agent}:**\n{c.critique_content}"
+                        for c in relevant_critiques
                     ])
                     
-                    refinement_prompt = f"""Based on the feedback from other AI agents, please refine your solution:
+                    refinement_prompt = f"""Based on the feedback from your colleagues, please refine your original proposal.
 
-**Original Task:** {topic}
+**Your Original Proposal:**
+{original_proposal.content}
 
 **Feedback Received:**
-{critique_text}
+{critiques_text}
 
-Please provide an improved solution that:
-- Addresses the valid concerns raised
-- Improves any weak areas identified  
-- Maintains your solution's core strengths
-- Creates a more robust overall approach
+**Your Task:** Revise your proposal incorporating the valid feedback while maintaining your core approach.
 
-Focus on creating the best possible solution incorporating this collaborative feedback."""
+Please provide:
+1. **Refined Proposal:** Your improved solution
+2. **Changes Made:** What you modified based on feedback
+3. **Rationale:** Why you made these changes or chose not to change certain aspects
+
+Maintain the strength of your original idea while addressing legitimate concerns."""
+
+                    refinement_context = context.model_copy()
+                    refinement_context.task_type = TaskType.DEBATE
+                    refinement_context.agent_role = AgentRole.PROPOSER
                     
-                    # Get refined proposal
                     async with AsyncPerformanceLogger(
-                        self.logger, f"final_proposal_{agent.name}", task_id=debate_id
+                        self.logger, f"refinement_{agent.name}", debate_id=debate_id
                     ):
                         response = await asyncio.wait_for(
-                            agent.generate(refinement_prompt, context),
+                            agent.generate(refinement_prompt, refinement_context),
                             timeout=self.timeout_per_phase
+                        )
+                    
+                    if response and response.content:
+                        self.logger.info(f"[{debate_id[:8]}] ✅ {agent.name} refined proposal ready")
+                        return AgentProposal(
+                            agent_type=agent.agent_type.value,
+                            agent_name=agent.name,
+                            content=response.content,
+                            confidence_score=getattr(response, 'confidence', 0.8),
+                            metadata={
+                                **getattr(response, 'metadata', {}),
+                                "refined": True,
+                                "original_proposal_id": id(original_proposal),
+                                "critiques_addressed": len(relevant_critiques)
+                            }
                         )
                 else:
                     self.logger.info(f"[{debate_id[:8]}] 📋 {agent.name} keeping original proposal (no critiques)")
-                    
-                    # No critiques received, return original proposal
-                    original_proposal = next(
-                        (prop for a, resp, prop in initial_proposals if a.name == agent.name),
-                        None
-                    )
-                    
-                    if original_proposal:
-                        response = next(resp for a, resp, prop in initial_proposals if a.name == agent.name)
-                    else:
-                        # Fallback - generate new proposal
-                        response = await agent.propose_solution(topic, [], context)
-                
-                if response.success:
-                    self.logger.info(f"[{debate_id[:8]}] ✅ {agent.name} final proposal ready")
-                    return (agent, response, response.content)
-                else:
-                    self.logger.warning(f"[{debate_id[:8]}] ❌ {agent.name} final proposal failed")
-                    return None
+                    return original_proposal
                     
             except asyncio.TimeoutError:
-                self.logger.warning(f"[{debate_id[:8]}] ⏱️ {agent.name} final proposal timed out")
+                self.logger.warning(f"[{debate_id[:8]}] ⏱️ {agent.name} refinement timed out")
                 return None
             except Exception as e:
-                self.logger.error(f"[{debate_id[:8]}] 💥 Final proposal error for {agent.name}: {e}")
+                self.logger.error(f"[{debate_id[:8]}] 💥 Refinement error for {agent.name}: {e}")
                 return None
         
-        # Generate final proposals concurrently
-        final_tasks = [generate_final_proposal(agent) for agent in agents]
-        final_results = await asyncio.gather(*final_tasks, return_exceptions=True)
+        # Gather refined proposals concurrently
+        refinement_tasks = [refine_agent_proposal(agent) for agent in agents]
+        refinement_results = await asyncio.gather(*refinement_tasks, return_exceptions=True)
         
-        # Filter successful proposals
-        for result in final_results:
+        # Filter successful refinements
+        for result in refinement_results:
             if result and not isinstance(result, Exception):
-                final_proposals.append(result)
+                refined_proposals.append(result)
         
-        self.logger.info(f"[{debate_id[:8]}] 🏁 Final phase complete: {len(final_proposals)} refined proposals")
-        return final_proposals
+        self.logger.info(f"[{debate_id[:8]}] 🏁 Refined {len(refined_proposals)} proposals")
+        return refined_proposals
+    
+    async def _evaluate_consensus(self, proposals: List[AgentProposal]) -> float:
+        """Evaluate consensus level between proposals."""
+        if len(proposals) < 2:
+            return 1.0
+        
+        # Simple consensus evaluation based on content similarity
+        # In production, you might want more sophisticated NLP analysis
+        
+        total_comparisons = 0
+        similarity_sum = 0.0
+        
+        for i, proposal1 in enumerate(proposals):
+            for j, proposal2 in enumerate(proposals[i+1:], i+1):
+                # Basic word overlap similarity
+                words1 = set(proposal1.content.lower().split())
+                words2 = set(proposal2.content.lower().split())
+                
+                if words1 and words2:
+                    overlap = len(words1.intersection(words2))
+                    union = len(words1.union(words2))
+                    similarity = overlap / union if union > 0 else 0
+                    
+                    similarity_sum += similarity
+                    total_comparisons += 1
+        
+        return similarity_sum / total_comparisons if total_comparisons > 0 else 0.0
+    
+    async def _generate_final_consensus(
+        self,
+        rounds: List[DebateRound],
+        agents: List[BaseAgent],
+        context: TaskContext
+    ) -> Optional[str]:
+        """Generate final consensus from debate rounds."""
+        
+        if not rounds or not rounds[-1].proposals:
+            return None
+        
+        # Use the first agent (typically Claude) to synthesize consensus
+        synthesizer = agents[0]
+        final_proposals = rounds[-1].proposals
+        
+        try:
+            # Build synthesis prompt
+            proposals_text = "\n\n".join([
+                f"**{prop.agent_name}'s Final Proposal:**\n{prop.content}"
+                for prop in final_proposals
+            ])
+            
+            synthesis_prompt = f"""Based on the debate that has taken place, synthesize the best elements from all proposals into a final consensus solution.
+
+**All Final Proposals:**
+{proposals_text}
+
+**Your Task:** Create a unified solution that incorporates the best ideas from each proposal while resolving any conflicts.
+
+Please provide:
+1. **Consensus Solution:** The combined best approach
+2. **Key Elements:** What you took from each proposal
+3. **Resolution:** How you resolved any conflicting ideas
+4. **Confidence:** Your confidence in this consensus (0-1)
+
+Focus on creating a practical, implementable solution that all parties could agree on."""
+
+            synthesis_context = context.model_copy()
+            synthesis_context.task_type = TaskType.CONSENSUS
+            synthesis_context.agent_role = AgentRole.SPECIALIST
+            
+            response = await synthesizer.generate(synthesis_prompt, synthesis_context)
+            
+            if response and response.content:
+                return response.content
+            
+        except Exception as e:
+            self.logger.error(f"Consensus generation failed: {e}")
+        
+        return None
+    
+    async def _generate_round_summary(self, round_data: DebateRound) -> str:
+        """Generate summary for a debate round."""
+        
+        summary_parts = [
+            f"**Round {round_data.round_number} Summary:**",
+            f"- Proposals: {len(round_data.proposals)}",
+            f"- Critiques: {len(round_data.critiques)}",
+            f"- Duration: {round_data.duration_seconds:.1f}s"
+        ]
+        
+        if round_data.proposals:
+            summary_parts.append("- Participating agents: " + 
+                                ", ".join([p.agent_name for p in round_data.proposals]))
+        
+        return "\n".join(summary_parts)
+    
+    async def _generate_debate_summary(self, debate_result: DebateResult) -> str:
+        """Generate comprehensive debate summary."""
+        
+        summary_parts = [
+            f"**Debate Summary: {debate_result.topic}**",
+            f"- Rounds completed: {debate_result.rounds_completed}",
+            f"- Duration: {debate_result.total_duration:.1f}s",
+            f"- Consensus score: {debate_result.consensus_score:.2f}",
+            f"- Participants: {', '.join(debate_result.participating_agents)}"
+        ]
+        
+        if debate_result.rounds:
+            total_proposals = sum(len(r.proposals) for r in debate_result.rounds)
+            total_critiques = sum(len(r.critiques) for r in debate_result.rounds)
+            
+            summary_parts.extend([
+                f"- Total proposals: {total_proposals}",
+                f"- Total critiques: {total_critiques}"
+            ])
+        
+        if debate_result.success:
+            summary_parts.append("- Status: ✅ Completed successfully")
+        else:
+            summary_parts.append(f"- Status: ❌ Failed ({debate_result.error_message})")
+        
+        return "\n".join(summary_parts)
+    
+    def get_active_debates(self) -> Dict[str, DebateResult]:
+        """Get currently active debates."""
+        return self._active_debates.copy()
+    
+    async def cancel_debate(self, debate_id: str) -> bool:
+        """Cancel an active debate."""
+        if debate_id in self._active_debates:
+            del self._active_debates[debate_id]
+            self.logger.info(f"Debate {debate_id[:8]} cancelled")
+            return True
+        return False
 
 
 class DebateError(Exception):

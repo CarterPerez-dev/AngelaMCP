@@ -19,8 +19,8 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 # Import configuration first
-from config.settings import settings
-from src.utils.logger import setup_logging, get_logger
+from config import settings
+from src.utils import setup_logging, get_logger
 
 # Set up logging early
 setup_logging()
@@ -34,6 +34,7 @@ async def run_mcp_server():
         from src.mcp_server import AngelaMCPServer
         
         server = AngelaMCPServer()
+        await server.initialize()
         await server.run()
         
     except Exception as e:
@@ -46,11 +47,11 @@ async def run_standalone_cli():
     try:
         logger.info("Starting AngelaMCP as standalone CLI...")
         from src.cli import CLI
-        from src.orchestrator.manager import TaskOrchestrator
-        from src.persistence.database import DatabaseManager
-        from src.agents.claude_agent import ClaudeCodeAgent
-        from src.agents.openai_agent import OpenAIAgent
-        from src.agents.gemini_agent import GeminiAgent
+        from src.orchestrator import TaskOrchestrator
+        from src.persistence import DatabaseManager
+        from src.agents import ClaudeCodeAgent
+        from src.agents import OpenAIAgent
+        from src.agents import GeminiAgent
         
         # Initialize database
         db_manager = DatabaseManager()
@@ -82,9 +83,20 @@ async def run_standalone_cli():
         sys.exit(1)
 
 
+async def shutdown_handler(signum, frame):
+    """Handle graceful shutdown."""
+    logger.info(f"Received signal {signum}, shutting down gracefully...")
+    # Add cleanup logic here
+    sys.exit(0)
+
+
 async def main():
     """Main application entry point."""
     try:
+        # Set up signal handlers
+        signal.signal(signal.SIGINT, shutdown_handler)
+        signal.signal(signal.SIGTERM, shutdown_handler)
+        
         # Check if running as MCP server
         if len(sys.argv) > 1 and sys.argv[1] == "mcp-server":
             await run_mcp_server()
@@ -98,15 +110,8 @@ async def main():
 
 def cli_main():
     """Entry point for CLI scripts (macp command)."""
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Application interrupted")
-        sys.exit(0)
-    except Exception as e:
-        logger.error(f"CLI main failed: {e}", exc_info=True)
-        sys.exit(1)
+    asyncio.run(main())
 
 
 if __name__ == "__main__":
-    cli_main()
+    asyncio.run(main())
