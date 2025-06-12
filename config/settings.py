@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from enum import Enum
-
+from typing import Optional
 from pydantic import Field, validator, PostgresDsn, RedisDsn
 from pydantic_settings import BaseSettings
 from pydantic.types import SecretStr
@@ -183,12 +183,15 @@ class Settings(BaseSettings):
 
     @validator("workspace_dir", "claude_session_dir", "log_file")
     def create_directories(cls, v: Path) -> Path:
-        """Create directories if they don't exist."""
-        if v.suffix:  # It's a file
-            v.parent.mkdir(parents=True, exist_ok=True)
-        else:  # It's a directory
-            v.mkdir(parents=True, exist_ok=True)
-        return v
+        """Create directories if they don't exist, expanding the user home directory."""
+        expanded_path = v.expanduser()
+        
+        if expanded_path.suffix:  
+            expanded_path.parent.mkdir(parents=True, exist_ok=True)
+        else:  
+            expanded_path.mkdir(parents=True, exist_ok=True)
+            
+        return expanded_path 
 
     @validator("allowed_file_extensions")
     def parse_file_extensions(cls, v: Any) -> List[str]:

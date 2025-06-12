@@ -1,360 +1,361 @@
 """
-Database connection and session management for AngelaMCP.
+Database connection management for AngelaMCP.
 
-This module provides async database connectivity with connection pooling,
-health checks, and proper resource management using SQLAlchemy 2.0.
-I'm implementing production-grade database patterns with comprehensive error handling.
+This handles both PostgreSQL and Redis connections with proper async support.
+I'm implementing production-grade connection pooling and error handling.
 """
 
 import asyncio
-import logging
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Optional, Dict, Any
+from typing import Optional, Dict, Any, AsyncGenerator
+import redis.asyncio as redis
 from sqlalchemy.ext.asyncio import (
-    AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+    create_async_engine, 
+    AsyncSession, 
+    async_sessionmaker,
+    AsyncEngine
 )
-from sqlalchemy.pool import NullPool, QueuePool
-from sqlalchemy import text, select, func
-from sqlalchemy.exc import SQLAlchemyError, DisconnectionError
-from sqlalchemy import event
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import text
 
+from src.persistence.models import Base
+from src.utils.logger import get_logger
+from src.utils.exceptions import DatabaseError
 from config.settings import settings
-from .models import Base
-
-logger = logging.getLogger(__name__)
-
-
-class DatabaseError(Exception):
-    """Custom exception for database-related errors."""
-    pass
-
-
-class ConnectionPoolError(DatabaseError):
-    """Exception for connection pool-related issues."""
-    pass
 
 
 class DatabaseManager:
     """
-    Manages async database connections with pooling and health monitoring.
+    Manages database connections and sessions.
     
-    I'm implementing a production-ready database manager that handles connection
-    pooling, graceful shutdowns, health checks, and connection recovery.
+    Handles both PostgreSQL (main storage) and Redis (caching/sessions).
+    I'm implementing proper connection pooling and error handling.
     """
     
     def __init__(self):
-        self._engine: Optional[AsyncEngine] = None
-        self._session_factory: Optional[async_sessionmaker[AsyncSession]] = None
-        self._health_check_interval = 30  # seconds
-        self._health_check_task: Optional[asyncio.Task] = None
-        self._is_healthy = False
+        self.logger = get_logger("database.manager")
         
+        # PostgreSQL
+        self.engine: Optional[AsyncEngine] = None
+        self.session_factory: Optional[async_sessionmaker] = None
+        
+        # Redis
+        self.redis_client: Optional[redis.Redis] = None
+        
+        # Connection status
+        self._initialized = False
+        self._postgres_healthy = False
+        self._redis_healthy = False
+    
     async def initialize(self) -> None:
-        """
-        Initialize the database engine and connection pool.
+        """Initialize database connections."""
+        if self._initialized:
+            self.logger.warning("Database manager already initialized")
+            return
         
-        I'm setting up the async engine with appropriate pool settings
-        based on the environment configuration.
-        """
         try:
-            # Build connection URL
-            database_url = str(settings.database_url)
+            self.logger.info("Initializing database connections...")
             
-            # Configure pool settings based on environment
-            pool_size = settings.database_pool_size
-            max_overflow = settings.database_max_overflow
-            pool_timeout = settings.database_pool_timeout
+            # Initialize PostgreSQL
+            await self._initialize_postgres()
             
-            # Handle different database types
-            if database_url.startswith("sqlite"):
-                # Convert to aiosqlite for async support
-                if not database_url.startswith("sqlite+aiosqlite"):
-                    database_url = database_url.replace("sqlite://", "sqlite+aiosqlite://")
-                
-                # Create SQLite async engine
-                self._engine = create_async_engine(
-                    database_url,
-                    echo=settings.database_echo,
-                    poolclass=NullPool,  # SQLite doesn't need connection pooling
-                )
-            else:
-                # Create PostgreSQL async engine with connection pooling
-                self._engine = create_async_engine(
-                    database_url,
-                    echo=settings.database_echo,
-                    pool_size=pool_size,
-                    max_overflow=max_overflow,
-                    pool_timeout=pool_timeout,
-                    pool_pre_ping=True,  # Verify connections before use
-                    pool_recycle=3600,   # Recycle connections every hour
-                    poolclass=QueuePool,
-                    connect_args={
-                        "command_timeout": 60,
-                        "server_settings": {
-                            "application_name": "AngelaMCP",
-                            "jit": "off"  # Disable JIT for better connection performance
-                        }
-                    }
-                )
+            # Initialize Redis
+            await self._initialize_redis()
             
-            # Set up connection pool event handlers (skip for SQLite)
-            if not database_url.startswith("sqlite"):
-                self._setup_pool_events()
+            # Verify connections
+            await self._verify_connections()
+            
+            self._initialized = True
+            self.logger.info("Database manager initialized successfully")
+            
+        except Exception as e:
+            self.logger.error(f"Database initialization failed: {e}", exc_info=True)
+            await self.close()
+            raise DatabaseError(f"Failed to initialize database: {e}")
+    
+    async def _initialize_postgres(self) -> None:
+        """Initialize PostgreSQL connection."""
+        try:
+            # Create async engine
+            self.engine = create_async_engine(
+                str(settings.database_url).replace("postgresql://", "postgresql+asyncpg://"),
+                pool_size=settings.database_pool_size,
+                max_overflow=settings.database_max_overflow,
+                pool_timeout=settings.database_pool_timeout,
+                echo=settings.database_echo,
+                pool_pre_ping=True,  # Verify connections before use
+                pool_recycle=3600,   # Recycle connections every hour
+            )
             
             # Create session factory
-            self._session_factory = async_sessionmaker(
-                bind=self._engine,
+            self.session_factory = async_sessionmaker(
+                bind=self.engine,
                 class_=AsyncSession,
-                expire_on_commit=False,
-                autoflush=True,
-                autocommit=False
+                expire_on_commit=False
             )
             
-            # Test the connection
-            await self._test_connection()
-            self._is_healthy = True
-            
-            # Start health check monitoring
-            await self._start_health_monitoring()
-            
-            logger.info(
-                f"Database initialized successfully with pool_size={pool_size}, "
-                f"max_overflow={max_overflow}"
-            )
+            self.logger.info("PostgreSQL engine initialized")
             
         except Exception as e:
-            logger.error(f"Failed to initialize database: {e}")
-            raise DatabaseError(f"Database initialization failed: {e}") from e
+            raise DatabaseError(f"Failed to initialize PostgreSQL: {e}")
     
-    def _setup_pool_events(self) -> None:
-        """Set up event handlers for connection pool monitoring."""
-        if not self._engine:
-            return
-            
-        @event.listens_for(self._engine.sync_engine.pool, "connect")
-        def on_connect(dbapi_connection, connection_record):
-            """Handle new connections."""
-            logger.debug("New database connection established")
-            
-        @event.listens_for(self._engine.sync_engine.pool, "checkout")
-        def on_checkout(dbapi_connection, connection_record, connection_proxy):
-            """Handle connection checkout from pool."""
-            logger.debug("Connection checked out from pool")
-            
-        @event.listens_for(self._engine.sync_engine.pool, "checkin")
-        def on_checkin(dbapi_connection, connection_record):
-            """Handle connection checkin to pool."""
-            logger.debug("Connection checked back into pool")
-            
-        @event.listens_for(self._engine.sync_engine.pool, "invalidate")
-        def on_invalidate(dbapi_connection, connection_record, exception):
-            """Handle connection invalidation."""
-            logger.warning(f"Connection invalidated: {exception}")
-    
-    async def _test_connection(self) -> None:
-        """Test database connectivity."""
-        if not self._engine:
-            raise DatabaseError("Engine not initialized")
-            
+    async def _initialize_redis(self) -> None:
+        """Initialize Redis connection."""
         try:
-            async with self._engine.begin() as conn:
+            self.redis_client = redis.from_url(
+                str(settings.redis_url),
+                max_connections=settings.redis_max_connections,
+                decode_responses=settings.redis_decode_responses,
+                socket_timeout=settings.redis_socket_timeout,
+                socket_connect_timeout=settings.redis_connection_timeout,
+                retry_on_timeout=True,
+                health_check_interval=30
+            )
+            
+            self.logger.info("Redis client initialized")
+            
+        except Exception as e:
+            raise DatabaseError(f"Failed to initialize Redis: {e}")
+    
+    async def _verify_connections(self) -> None:
+        """Verify database connections are working."""
+        # Test PostgreSQL
+        try:
+            async with self.engine.begin() as conn:
                 result = await conn.execute(text("SELECT 1"))
-                result.fetchone()  # fetchone() is not async
-            logger.info("Database connection test successful")
+                assert result.scalar() == 1
+            self._postgres_healthy = True
+            self.logger.info("✅ PostgreSQL connection verified")
         except Exception as e:
-            logger.error(f"Database connection test failed: {e}")
-            raise DatabaseError(f"Connection test failed: {e}") from e
-    
-    async def _start_health_monitoring(self) -> None:
-        """Start background health check monitoring."""
-        if self._health_check_task and not self._health_check_task.done():
-            return
-            
-        self._health_check_task = asyncio.create_task(self._health_check_loop())
-        logger.info("Database health monitoring started")
-    
-    async def _health_check_loop(self) -> None:
-        """Background task for periodic health checks."""
-        while True:
-            try:
-                await asyncio.sleep(self._health_check_interval)
-                
-                if self._engine:
-                    # Perform health check
-                    start_time = asyncio.get_event_loop().time()
-                    await self._test_connection()
-                    end_time = asyncio.get_event_loop().time()
-                    
-                    response_time = end_time - start_time
-                    self._is_healthy = True
-                    
-                    logger.debug(f"Health check passed in {response_time:.3f}s")
-                    
-                    # Log pool status
-                    pool = self._engine.pool
-                    logger.debug(
-                        f"Pool status: size={pool.size()}, "
-                        f"checked_in={pool.checkedin()}, "
-                        f"checked_out={pool.checkedout()}, "
-                        f"overflow={pool.overflow()}"
-                    )
-                    
-            except Exception as e:
-                self._is_healthy = False
-                logger.error(f"Health check failed: {e}")
-                # Continue monitoring even if health check fails
-    
-    async def create_tables(self) -> None:
-        """Create all database tables."""
-        if not self._engine:
-            raise DatabaseError("Engine not initialized")
-            
+            self._postgres_healthy = False
+            raise DatabaseError(f"PostgreSQL connection verification failed: {e}")
+        
+        # Test Redis
         try:
-            async with self._engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
-            logger.info("Database tables created successfully")
+            await self.redis_client.ping()
+            self._redis_healthy = True
+            self.logger.info("✅ Redis connection verified")
         except Exception as e:
-            logger.error(f"Failed to create tables: {e}")
-            raise DatabaseError(f"Table creation failed: {e}") from e
-    
-    async def drop_tables(self) -> None:
-        """Drop all database tables."""
-        if not self._engine:
-            raise DatabaseError("Engine not initialized")
-            
-        try:
-            async with self._engine.begin() as conn:
-                await conn.run_sync(Base.metadata.drop_all)
-            logger.info("Database tables dropped successfully")
-        except Exception as e:
-            logger.error(f"Failed to drop tables: {e}")
-            raise DatabaseError(f"Table drop failed: {e}") from e
+            self._redis_healthy = False
+            raise DatabaseError(f"Redis connection verification failed: {e}")
     
     @asynccontextmanager
     async def get_session(self) -> AsyncGenerator[AsyncSession, None]:
-        """
-        Get an async database session with automatic cleanup.
+        """Get a database session with automatic cleanup."""
+        if not self._initialized or not self.session_factory:
+            raise DatabaseError("Database not initialized")
         
-        This context manager ensures proper session management with
-        automatic rollback on errors and cleanup on exit.
-        """
-        if not self._session_factory:
-            raise DatabaseError("Session factory not initialized")
-            
-        session = self._session_factory()
+        session = self.session_factory()
         try:
-            logger.debug("Database session created")
             yield session
             await session.commit()
-            logger.debug("Database session committed")
         except Exception as e:
             await session.rollback()
-            logger.error(f"Database session rolled back due to error: {e}")
-            raise
+            self.logger.error(f"Database session error: {e}")
+            raise DatabaseError(f"Database operation failed: {e}")
         finally:
             await session.close()
-            logger.debug("Database session closed")
     
-    async def execute_query(self, query: str, params: Optional[Dict[str, Any]] = None) -> Any:
-        """Execute a raw SQL query with parameters."""
-        async with self.get_session() as session:
-            try:
-                result = await session.execute(text(query), params or {})
-                return result
-            except SQLAlchemyError as e:
-                logger.error(f"Query execution failed: {e}")
-                raise DatabaseError(f"Query failed: {e}") from e
+    async def get_redis(self) -> redis.Redis:
+        """Get Redis client."""
+        if not self._initialized or not self.redis_client:
+            raise DatabaseError("Redis not initialized")
+        
+        return self.redis_client
     
-    async def get_connection_info(self) -> Dict[str, Any]:
-        """Get current database connection information."""
-        if not self._engine:
-            return {"status": "not_initialized"}
-            
-        pool = self._engine.pool
-        return {
-            "status": "healthy" if self._is_healthy else "unhealthy",
-            "pool_size": pool.size(),
-            "checked_in": pool.checkedin(),
-            "checked_out": pool.checkedout(),
-            "overflow": pool.overflow(),
-            "engine_url": str(self._engine.url).replace(self._engine.url.password or "", "***")
-        }
-    
-    async def close(self) -> None:
-        """Gracefully close all database connections."""
+    async def create_tables(self) -> None:
+        """Create all database tables."""
+        if not self.engine:
+            raise DatabaseError("Database engine not initialized")
+        
         try:
-            # Stop health monitoring
-            if self._health_check_task and not self._health_check_task.done():
-                self._health_check_task.cancel()
-                try:
-                    await self._health_check_task
-                except asyncio.CancelledError:
-                    pass
-            
-            # Close engine
-            if self._engine:
-                await self._engine.dispose()
-                logger.info("Database engine disposed")
+            self.logger.info("Creating database tables...")
+            async with self.engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            self.logger.info("✅ Database tables created")
+        except Exception as e:
+            raise DatabaseError(f"Failed to create tables: {e}")
+    
+    async def drop_tables(self) -> None:
+        """Drop all database tables (use with caution!)."""
+        if not self.engine:
+            raise DatabaseError("Database engine not initialized")
+        
+        try:
+            self.logger.warning("Dropping all database tables...")
+            async with self.engine.begin() as conn:
+                await conn.run_sync(Base.metadata.drop_all)
+            self.logger.info("Database tables dropped")
+        except Exception as e:
+            raise DatabaseError(f"Failed to drop tables: {e}")
+    
+    async def health_check(self) -> Dict[str, Any]:
+        """Check health of all database connections."""
+        health_status = {
+            "overall": "healthy",
+            "postgres": {"status": "unknown"},
+            "redis": {"status": "unknown"}
+        }
+        
+        # Check PostgreSQL
+        try:
+            if self.engine:
+                async with self.engine.begin() as conn:
+                    start_time = asyncio.get_event_loop().time()
+                    result = await conn.execute(text("SELECT version()"))
+                    response_time = asyncio.get_event_loop().time() - start_time
+                    
+                    health_status["postgres"] = {
+                        "status": "healthy",
+                        "response_time": response_time,
+                        "version": result.scalar()[:50] + "...",
+                        "pool_size": self.engine.pool.size(),
+                        "checked_out": self.engine.pool.checkedout()
+                    }
+                    self._postgres_healthy = True
+            else:
+                health_status["postgres"] = {"status": "not_initialized"}
+        except Exception as e:
+            health_status["postgres"] = {
+                "status": "unhealthy",
+                "error": str(e)
+            }
+            self._postgres_healthy = False
+        
+        # Check Redis
+        try:
+            if self.redis_client:
+                start_time = asyncio.get_event_loop().time()
+                await self.redis_client.ping()
+                response_time = asyncio.get_event_loop().time() - start_time
                 
-            self._engine = None
-            self._session_factory = None
-            self._is_healthy = False
+                info = await self.redis_client.info()
+                health_status["redis"] = {
+                    "status": "healthy",
+                    "response_time": response_time,
+                    "version": info.get("redis_version", "unknown"),
+                    "connected_clients": info.get("connected_clients", 0),
+                    "used_memory": info.get("used_memory_human", "unknown")
+                }
+                self._redis_healthy = True
+            else:
+                health_status["redis"] = {"status": "not_initialized"}
+        except Exception as e:
+            health_status["redis"] = {
+                "status": "unhealthy", 
+                "error": str(e)
+            }
+            self._redis_healthy = False
+        
+        # Overall status
+        if not self._postgres_healthy or not self._redis_healthy:
+            health_status["overall"] = "degraded"
+        
+        if not self._postgres_healthy and not self._redis_healthy:
+            health_status["overall"] = "unhealthy"
+        
+        return health_status
+    
+    async def execute_raw_query(self, query: str, params: Optional[Dict[str, Any]] = None) -> Any:
+        """Execute a raw SQL query."""
+        if not self.engine:
+            raise DatabaseError("Database engine not initialized")
+        
+        try:
+            async with self.engine.begin() as conn:
+                result = await conn.execute(text(query), params or {})
+                return result
+        except SQLAlchemyError as e:
+            raise DatabaseError(f"Query execution failed: {e}")
+    
+    async def get_table_stats(self) -> Dict[str, Any]:
+        """Get statistics about database tables."""
+        if not self.engine:
+            raise DatabaseError("Database engine not initialized")
+        
+        try:
+            stats = {}
+            async with self.engine.begin() as conn:
+                # Get table row counts
+                tables = ["conversations", "messages", "task_executions", "debate_rounds", "agent_responses"]
+                
+                for table in tables:
+                    result = await conn.execute(text(f"SELECT COUNT(*) FROM {table}"))
+                    stats[table] = result.scalar()
+                
+                # Get database size
+                result = await conn.execute(text("SELECT pg_size_pretty(pg_database_size(current_database()))"))
+                stats["database_size"] = result.scalar()
+                
+            return stats
             
         except Exception as e:
-            logger.error(f"Error during database cleanup: {e}")
-            raise DatabaseError(f"Database cleanup failed: {e}") from e
+            self.logger.error(f"Failed to get table stats: {e}")
+            return {"error": str(e)}
     
-    @property
-    def is_healthy(self) -> bool:
-        """Check if the database connection is healthy."""
-        return self._is_healthy
-    
-    @property
-    def engine(self) -> Optional[AsyncEngine]:
-        """Get the database engine."""
-        return self._engine
-
-
-# Global database manager instance
-db_manager = DatabaseManager()
-
-
-async def init_database() -> None:
-    """Initialize the global database manager."""
-    await db_manager.initialize()
-
-
-async def close_database() -> None:
-    """Close the global database manager."""
-    await db_manager.close()
-
-
-async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
-    """Get a database session from the global manager."""
-    async with db_manager.get_session() as session:
-        yield session
-
-
-async def health_check() -> Dict[str, Any]:
-    """Perform a database health check."""
-    try:
-        info = await db_manager.get_connection_info()
+    async def cleanup_old_data(self, days_old: int = 30) -> Dict[str, int]:
+        """Clean up old data from the database."""
+        if not self.engine:
+            raise DatabaseError("Database engine not initialized")
         
-        # Additional health metrics
-        if db_manager.engine:
-            async with db_manager.get_session() as session:
-                # Test query performance
-                start_time = asyncio.get_event_loop().time()
-                await session.execute(select(func.now()))
-                end_time = asyncio.get_event_loop().time()
+        try:
+            cleanup_stats = {}
+            
+            async with self.get_session() as session:
+                # Clean up old conversations
+                result = await session.execute(text("""
+                    DELETE FROM conversations 
+                    WHERE created_at < NOW() - INTERVAL '%s days'
+                    AND status = 'completed'
+                """), {"days": days_old})
+                cleanup_stats["conversations_deleted"] = result.rowcount
                 
-                info["query_response_time_ms"] = (end_time - start_time) * 1000
-        
-        return info
-        
-    except Exception as e:
-        logger.error(f"Health check failed: {e}")
-        return {
-            "status": "error",
-            "error": str(e)
-        }
+                # Clean up old metrics
+                result = await session.execute(text("""
+                    DELETE FROM session_metrics 
+                    WHERE timestamp < NOW() - INTERVAL '%s days'
+                """), {"days": days_old})
+                cleanup_stats["metrics_deleted"] = result.rowcount
+            
+            self.logger.info(f"Cleanup completed: {cleanup_stats}")
+            return cleanup_stats
+            
+        except Exception as e:
+            raise DatabaseError(f"Data cleanup failed: {e}")
+    
+    async def close(self) -> None:
+        """Close all database connections."""
+        try:
+            # Close PostgreSQL
+            if self.engine:
+                await self.engine.dispose()
+                self.engine = None
+                self.session_factory = None
+                self.logger.info("PostgreSQL connections closed")
+            
+            # Close Redis
+            if self.redis_client:
+                await self.redis_client.close()
+                self.redis_client = None
+                self.logger.info("Redis connections closed")
+            
+            self._initialized = False
+            self._postgres_healthy = False
+            self._redis_healthy = False
+            
+        except Exception as e:
+            self.logger.error(f"Error closing database connections: {e}")
+    
+    def is_healthy(self) -> bool:
+        """Check if database connections are healthy."""
+        return self._initialized and self._postgres_healthy and self._redis_healthy
+    
+    @property
+    def postgres_healthy(self) -> bool:
+        """Check if PostgreSQL is healthy."""
+        return self._postgres_healthy
+    
+    @property
+    def redis_healthy(self) -> bool:
+        """Check if Redis is healthy."""
+        return self._redis_healthy

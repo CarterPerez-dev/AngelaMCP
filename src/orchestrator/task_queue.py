@@ -14,7 +14,7 @@ from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Set
 from uuid import uuid4
 
-from src.models.database import TaskStatus
+from src.persistence.database import TaskStatus
 from src.orchestrator.task_analyzer import TaskAnalysis, TaskComplexity
 
 

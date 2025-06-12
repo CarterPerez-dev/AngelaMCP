@@ -1,488 +1,239 @@
 """
-Gemini agent implementation for AngelaMCP.
+Gemini Agent implementation for AngelaMCP using the new Google Gen AI SDK.
 
-This module implements the Gemini agent wrapper using the 2.5-pro model with
-comprehensive safety settings, error handling, and cost tracking. I'm implementing
-a production-grade client that specializes in research and creative problem-solving.
+This agent specializes in research, documentation, and creative problem-solving.
+I'm using the latest google-genai SDK for better performance and features.
 """
 
 import asyncio
 import time
-from typing import Dict, Any, List, Optional
+from typing import List, Dict, Any, Optional
 
+# New Gemini SDK imports
 from google import genai
 from google.genai import types
-from google.genai._exceptions import (
-    ClientError, ServerError, ValidationError,
-    QuotaExhaustedError, PermissionDeniedError
-)
 
-from .base import (
-    BaseAgent, AgentType, AgentResponse, TaskContext, TaskType,
-    AgentCapability, AgentError, AgentRateLimitError,
-    AgentTimeoutError, AgentAuthenticationError
-)
-from src.utils.logger import get_logger, log_agent_interaction, AsyncPerformanceLogger
+from src.agents.base import BaseAgent, AgentType, AgentResponse, TaskContext, TaskType
+from src.utils.logger import get_logger
+from src.utils.exceptions import AgentError
 from config.settings import settings
 
 logger = get_logger("agents.gemini")
 
 
-class GeminiError(AgentError):
-    """Specific error for Gemini operations."""
-    pass
-
-
 class GeminiAgent(BaseAgent):
     """
-    Gemini agent implementation using 2.5-pro model.
-    
-    I'm implementing a comprehensive Gemini client that provides research and creative
-    capabilities with proper safety settings, cost tracking, and error handling.
+    Gemini agent using the new Google Gen AI SDK.
+
+    Specialized in:
+    - Research and analysis
+    - Documentation generation
+    - Creative problem-solving
+    - Best practices research
     """
-    
-    def __init__(self, name: str = "gemini", api_key: Optional[str] = None):
-        super().__init__(AgentType.GEMINI, name, settings)
-        
-        # Gemini configuration
-        self.api_key = api_key or settings.google_api_key.get_secret_value()
-        self.model = settings.gemini_model
-        self.max_output_tokens = settings.gemini_max_output_tokens
-        self.temperature = settings.gemini_temperature
-        self.top_p = settings.gemini_top_p
-        self.top_k = settings.gemini_top_k
-        
-        # Initialize Gemini client
-        self.client = genai.Client(api_key=self.api_key)
-        
-        # Cost tracking (estimated per 1K tokens)
-        self.input_cost_per_1k = settings.gemini_input_cost
-        self.output_cost_per_1k = settings.gemini_output_cost
-        
-        # Safety settings
-        self.safety_settings = self._setup_safety_settings()
-        
-        # Define capabilities
-        self._setup_capabilities()
-        
-        self.logger.info(f"Gemini agent initialized with model: {self.model}")
-    
-    def _setup_safety_settings(self) -> List[types.SafetySetting]:
-        """Configure safety settings for Gemini."""
-        return [
-            types.SafetySetting(
-                category='HARM_CATEGORY_HATE_SPEECH',
-                threshold='BLOCK_MEDIUM_AND_ABOVE',
-            ),
-            types.SafetySetting(
-                category='HARM_CATEGORY_DANGEROUS_CONTENT',
-                threshold='BLOCK_MEDIUM_AND_ABOVE',
-            ),
-            types.SafetySetting(
-                category='HARM_CATEGORY_SEXUALLY_EXPLICIT',
-                threshold='BLOCK_MEDIUM_AND_ABOVE',
-            ),
-            types.SafetySetting(
-                category='HARM_CATEGORY_HARASSMENT',
-                threshold='BLOCK_MEDIUM_AND_ABOVE',
-            ),
-        ]
-    
-    def _setup_capabilities(self) -> None:
-        """Define Gemini agent capabilities."""
-        self._capabilities = [
-            AgentCapability(
-                name="creative_thinking",
-                description="Generate creative and innovative solutions",
-                supported_formats=["text", "markdown", "structured"],
-                limitations=["Safety filtering may block some content"],
-                cost_per_request=0.005
-            ),
-            AgentCapability(
-                name="research_synthesis",
-                description="Synthesize information from multiple perspectives",
-                supported_formats=["text", "markdown", "json"],
-                limitations=["Knowledge cutoff limitations"],
-                cost_per_request=0.008
-            ),
-            AgentCapability(
-                name="technical_analysis",
-                description="Analyze complex technical problems",
-                supported_formats=["text", "code", "diagrams"],
-                limitations=["Cannot execute or test code"],
-                cost_per_request=0.010
-            ),
-            AgentCapability(
-                name="alternative_approaches",
-                description="Propose alternative solutions and approaches",
-                supported_formats=["text", "structured_analysis"],
-                limitations=["May require validation for practicality"],
-                cost_per_request=0.007
-            ),
-            AgentCapability(
-                name="long_form_content",
-                description="Generate detailed, comprehensive content",
-                supported_formats=["text", "markdown", "documentation"],
-                limitations=["Output length limits"],
-                cost_per_request=0.012
-            )
-        ]
-    
-    def _estimate_tokens(self, text: str) -> int:
-        """Estimate token count for cost calculation."""
-        # Rough estimation for Gemini tokens (similar to GPT)
-        return int(len(text.split()) * 1.3)
-    
-    def _calculate_cost(self, input_tokens: int, output_tokens: int) -> float:
-        """Calculate estimated cost based on token usage."""
-        input_cost = (input_tokens / 1000) * self.input_cost_per_1k
-        output_cost = (output_tokens / 1000) * self.output_cost_per_1k
-        return input_cost + output_cost
-    
-    def _build_generation_config(self, context: TaskContext) -> types.GenerateContentConfig:
-        """Build generation configuration for Gemini."""
-        return types.GenerateContentConfig(
-            temperature=context.temperature or self.temperature,
-            top_p=self.top_p,
-            top_k=self.top_k,
-            max_output_tokens=context.max_tokens or self.max_output_tokens,
-            safety_settings=self.safety_settings
+
+    def __init__(self):
+        super().__init__(
+            agent_type=AgentType.GEMINI,
+            name="Gemini Research Specialist",
+            capabilities=[
+                "research_analysis",
+                "documentation",
+                "creative_solutions",
+                "best_practices",
+                "comprehensive_analysis"
+            ]
         )
-    
-    def _build_system_prompt(self, context: TaskContext) -> str:
-        """Build appropriate system prompt based on agent role."""
-        if context.agent_role.value == "researcher":
-            return """You are a comprehensive technical researcher and analyst. Your role is to:
-- Conduct thorough research on technical topics
-- Synthesize information from multiple perspectives
-- Provide balanced, well-reasoned analysis
-- Identify trends, patterns, and implications
-- Suggest innovative approaches and solutions
-- Present findings in a clear, structured format
 
-Focus on accuracy, depth, and practical insights."""
+        # Initialize the new Gemini client
+        self.client = genai.Client(api_key=settings.google_api_key)
+        self.model = settings.gemini_model
+        self.max_retries = settings.gemini_max_retries
+        self.retry_delay = settings.gemini_retry_delay
 
-        elif context.agent_role.value == "specialist":
-            return """You are a technical specialist with deep expertise. Your role is to:
-- Provide expert analysis on complex technical problems
-- Offer specialized insights and advanced solutions
-- Identify nuanced issues that others might miss
-- Propose cutting-edge approaches and methodologies
-- Evaluate trade-offs and implications thoroughly
-- Share best practices from specialized domains
+        # Default generation config
+        self.default_config = types.GenerateContentConfig(
+            max_output_tokens=settings.gemini_max_output_tokens,
+            temperature=settings.gemini_temperature,
+            top_p=settings.gemini_top_p,
+            top_k=settings.gemini_top_k,
+            stop_sequences=[],
+        )
 
-Focus on expertise, innovation, and technical excellence."""
+        logger.info(f"Initialized Gemini agent with model: {self.model}")
 
-        else:
-            return """You are a creative and analytical AI assistant specializing in technical problem-solving. Your role is to:
-- Think creatively about complex problems
-- Propose innovative solutions and approaches
-- Provide comprehensive analysis and insights
-- Consider multiple perspectives and alternatives
-- Generate detailed, well-structured responses
-- Focus on practical applicability and value
-
-Be thorough, creative, and solution-oriented in your responses."""
-    
-    async def _make_generation_request(self, prompt: str, context: TaskContext) -> Any:
-        """Make a content generation request to Gemini."""
-        try:
-            # Build full prompt with system context
-            system_prompt = self._build_system_prompt(context)
-            full_prompt = f"{system_prompt}\n\nUser Request:\n{prompt}"
-            
-            # Build configuration
-            config = self._build_generation_config(context)
-            
-            # Make API request
-            response = await self.client.aio.models.generate_content(
-                model=self.model,
-                contents=full_prompt,
-                config=config
-            )
-            
-            return response
-            
-        except QuotaExhaustedError as e:
-            raise AgentRateLimitError(
-                f"Gemini quota exhausted: {e}",
-                agent_type=self.agent_type.value,
-                error_code="QUOTA_EXHAUSTED"
-            ) from e
-        
-        except PermissionDeniedError as e:
-            raise AgentAuthenticationError(
-                f"Gemini permission denied: {e}",
-                agent_type=self.agent_type.value,
-                error_code="PERMISSION_DENIED"
-            ) from e
-        
-        except ValidationError as e:
-            raise GeminiError(
-                f"Gemini validation error: {e}",
-                agent_type=self.agent_type.value,
-                error_code="VALIDATION_ERROR"
-            ) from e
-        
-        except (ClientError, ServerError) as e:
-            raise GeminiError(
-                f"Gemini API error: {e}",
-                agent_type=self.agent_type.value,
-                error_code="API_ERROR"
-            ) from e
-        
-        except asyncio.TimeoutError as e:
-            raise AgentTimeoutError(
-                f"Gemini request timed out: {e}",
-                agent_type=self.agent_type.value,
-                error_code="REQUEST_TIMEOUT"
-            ) from e
-    
-    def _parse_generation_response(self, response: Any, input_tokens: int, execution_time: float) -> AgentResponse:
-        """Parse Gemini generation response into standardized format."""
-        try:
-            # Extract content
-            if hasattr(response, 'text') and response.text:
-                content = response.text
-            elif hasattr(response, 'candidates') and response.candidates:
-                # Handle multiple candidates - take the first one
-                candidate = response.candidates[0]
-                if hasattr(candidate, 'content') and candidate.content:
-                    content = candidate.content.parts[0].text if candidate.content.parts else ""
-                else:
-                    content = str(candidate)
-            else:
-                content = str(response)
-            
-            # Estimate output tokens and calculate cost
-            output_tokens = self._estimate_tokens(content)
-            total_tokens = input_tokens + output_tokens
-            cost = self._calculate_cost(input_tokens, output_tokens)
-            
-            # Check for safety blocks
-            safety_blocked = False
-            safety_ratings = []
-            
-            if hasattr(response, 'candidates') and response.candidates:
-                candidate = response.candidates[0]
-                if hasattr(candidate, 'safety_ratings'):
-                    safety_ratings = [
-                        {
-                            "category": rating.category,
-                            "probability": rating.probability,
-                            "blocked": getattr(rating, 'blocked', False)
-                        }
-                        for rating in candidate.safety_ratings
-                    ]
-                    safety_blocked = any(rating.get('blocked', False) for rating in safety_ratings)
-                
-                if hasattr(candidate, 'finish_reason'):
-                    if candidate.finish_reason in ['SAFETY', 'BLOCKED']:
-                        safety_blocked = True
-            
-            if safety_blocked:
-                return AgentResponse(
-                    success=False,
-                    content="Content blocked by safety filters",
-                    agent_type=self.agent_type.value,
-                    execution_time_ms=execution_time * 1000,
-                    error_message="Content blocked by safety filters",
-                    metadata={
-                        "safety_blocked": True,
-                        "safety_ratings": safety_ratings,
-                        "model": self.model
-                    }
-                )
-            
-            return AgentResponse(
-                success=True,
-                content=content,
-                agent_type=self.agent_type.value,
-                execution_time_ms=execution_time * 1000,
-                tokens_used=total_tokens,
-                cost_usd=cost,
-                metadata={
-                    "model": self.model,
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "safety_ratings": safety_ratings,
-                    "finish_reason": getattr(response.candidates[0], 'finish_reason', None) if hasattr(response, 'candidates') and response.candidates else None
-                }
-            )
-            
-        except Exception as e:
-            self.logger.error(f"Error parsing Gemini response: {e}")
-            return AgentResponse(
-                success=False,
-                content="",
-                agent_type=self.agent_type.value,
-                execution_time_ms=execution_time * 1000,
-                error_message=f"Response parsing error: {e}",
-                metadata={"model": self.model, "raw_response": str(response)}
-            )
-    
     async def generate(self, prompt: str, context: TaskContext) -> AgentResponse:
-        """Generate a response using Gemini."""
+        """Generate response using Gemini with the new SDK."""
         start_time = time.time()
-        
-        async with AsyncPerformanceLogger(self.logger, "gemini_generate", task_id=context.task_id):
-            try:
-                # Estimate input tokens
-                input_tokens = self._estimate_tokens(prompt)
-                
-                # Make API request with retry logic
-                response = await self.execute_with_retry(
-                    self._make_generation_request, prompt, context
-                )
-                
-                execution_time = time.time() - start_time
-                parsed_response = self._parse_generation_response(response, input_tokens, execution_time)
-                
-                # Update metrics
-                self._update_metrics(parsed_response)
-                
-                # Log interaction
-                log_agent_interaction(
-                    self.logger,
-                    self.name,
-                    "generate",
-                    input_data=prompt,
-                    output_data=parsed_response.content,
-                    metadata={
-                        "task_id": context.task_id,
-                        "model": self.model,
-                        "tokens_used": parsed_response.tokens_used,
-                        "cost_usd": parsed_response.cost_usd,
-                        "execution_time_ms": parsed_response.execution_time_ms,
-                        "safety_blocked": parsed_response.metadata.get("safety_blocked", False)
-                    }
-                )
-                
-                return parsed_response
-                
-            except Exception as e:
-                execution_time = time.time() - start_time
-                self.logger.error(f"Gemini generation failed: {e}")
-                
-                return AgentResponse(
-                    success=False,
-                    content="",
-                    agent_type=self.agent_type.value,
-                    execution_time_ms=execution_time * 1000,
-                    error_message=str(e),
-                    metadata={"task_id": context.task_id, "model": self.model}
-                )
-    
+
+        try:
+            # Build generation config
+            config = self._build_config(context)
+
+            # Add system instruction based on task type
+            system_instruction = self._get_system_instruction(context)
+            if system_instruction:
+                config.system_instruction = system_instruction
+
+            logger.debug(f"Generating response for prompt: {prompt[:100]}...")
+
+            # Generate content with retry logic
+            for attempt in range(self.max_retries + 1):
+                try:
+                    response = self.client.models.generate_content(
+                        model=self.model,
+                        contents=prompt,
+                        config=config
+                    )
+
+                    # Extract response text
+                    if response.candidates and response.candidates[0].content.parts:
+                        content = response.candidates[0].content.parts[0].text
+
+                        # Calculate metrics
+                        execution_time = time.time() - start_time
+                        input_tokens = getattr(response.usage_metadata, 'prompt_token_count', 0)
+                        output_tokens = getattr(response.usage_metadata, 'candidates_token_count', 0)
+
+                        return AgentResponse(
+                            agent_type=self.agent_type,
+                            content=content,
+                            confidence=self._calculate_confidence(response),
+                            execution_time_ms=execution_time * 1000,
+                            token_usage={
+                                "input_tokens": input_tokens,
+                                "output_tokens": output_tokens,
+                                "total_tokens": input_tokens + output_tokens
+                            },
+                            metadata={
+                                "model": self.model,
+                                "finish_reason": response.candidates[0].finish_reason if response.candidates else None,
+                                "safety_ratings": self._extract_safety_ratings(response),
+                                "attempt": attempt + 1
+                            }
+                        )
+                    else:
+                        raise AgentError("No valid response content from Gemini")
+
+                except Exception as e:
+                    if attempt < self.max_retries:
+                        logger.warning(f"Gemini API error (attempt {attempt + 1}): {e}")
+                        await asyncio.sleep(self.retry_delay * (2 ** attempt))  # Exponential backoff
+                        continue
+                    else:
+                        raise AgentError(f"Gemini API failed after {self.max_retries + 1} attempts: {e}")
+
+        except Exception as e:
+            logger.error(f"Gemini generation failed: {e}", exc_info=True)
+            raise AgentError(f"Gemini generation error: {e}")
+
     async def critique(self, content: str, original_task: str, context: TaskContext) -> AgentResponse:
         """Provide comprehensive critique using Gemini's analytical capabilities."""
-        critique_prompt = f"""Please provide a comprehensive critique and analysis of the following solution for the task: "{original_task}"
+        critique_prompt = f"""Please provide a thorough critique of the following solution for the task: "{original_task}"
 
-Solution to analyze:
+Solution to review:
 {content}
 
-Provide a thorough analysis including:
+Provide a comprehensive analysis including:
 
-**Creative Assessment:**
-- Innovation and originality of the approach
-- Creative problem-solving elements
-- Unique insights or perspectives demonstrated
+**Research-Based Assessment:**
+- How well does this align with current best practices?
+- What recent developments or trends are relevant?
+- Are there established patterns or frameworks being followed?
 
-**Technical Evaluation:**
-- Technical soundness and correctness
-- Efficiency and performance considerations
-- Scalability and maintainability aspects
-- Security and reliability factors
+**Creative Alternatives:**
+- What innovative approaches could be considered?
+- Are there unconventional but effective solutions?
+- How could this be enhanced with creative thinking?
 
-**Alternative Perspectives:**
-- Different approaches that could be considered
-- Trade-offs and decision rationale
-- Potential improvements or optimizations
-- Edge cases and corner scenarios
+**Documentation Quality:**
+- Is the solution well-documented and explained?
+- What additional documentation would be helpful?
+- How clear is the approach for future maintenance?
 
-**Implementation Analysis:**
-- Practical feasibility of the solution
-- Resource requirements and constraints
-- Integration considerations
-- Deployment and operational aspects
+**Comprehensive Analysis:**
+- Long-term implications and sustainability
+- Scalability considerations
+- Integration with broader ecosystem
+- Knowledge gaps that should be addressed
 
-**Holistic Evaluation:**
-- Overall quality and completeness
-- Alignment with best practices
-- Long-term viability and sustainability
-- Risk assessment and mitigation strategies
+**Research Recommendations:**
+- What additional research would strengthen this solution?
+- Are there relevant case studies or examples?
+- What resources should be consulted for improvement?
 
-Focus on providing balanced, constructive feedback that considers multiple dimensions of the solution."""
+Focus on providing deep, research-backed insights that go beyond surface-level review."""
 
         # Update context for critique task
         critique_context = context.model_copy()
         critique_context.task_type = TaskType.CODE_REVIEW
-        critique_context.agent_role = "specialist"
-        
-        return await self.generate(critique_prompt, critique_context)
-    
-    async def propose_solution(self, task_description: str, constraints: List[str], 
-                             context: TaskContext) -> AgentResponse:
-        """Propose innovative solutions using Gemini's creative capabilities."""
-        constraints_text = "\n".join(f"- {constraint}" for constraint in constraints) if constraints else "None specified"
-        
-        solution_prompt = f"""Analyze the following challenge and propose innovative, comprehensive solutions:
+        critique_context.agent_role = "research_analyst"
 
-**Challenge:** {task_description}
+        return await self.generate(critique_prompt, critique_context)
+
+    async def propose_solution(self, task_description: str, constraints: List[str],
+                             context: TaskContext) -> AgentResponse:
+        """Propose innovative solutions using Gemini's research capabilities."""
+        constraints_text = "\n".join(f"- {constraint}" for constraint in constraints) if constraints else "None specified"
+
+        solution_prompt = f"""Conduct comprehensive research and propose an innovative solution for:
+
+**Task:** {task_description}
 
 **Constraints:**
 {constraints_text}
 
-Please provide creative and thorough solutions including:
+Please provide a research-driven solution including:
 
-**1. Creative Problem Analysis:**
-- Multiple perspectives on the problem
-- Hidden assumptions and underlying factors
-- Root cause analysis and systemic considerations
-- Innovative framing of the challenge
+**1. Background Research:**
+- Current state of the art in this domain
+- Historical context and evolution
+- Key players and established solutions
+- Recent innovations and emerging trends
 
-**2. Solution Exploration:**
-- Multiple creative approaches and alternatives
-- Unconventional methods and techniques
-- Cross-disciplinary insights and applications
-- Emerging technologies and methodologies
-
-**3. Detailed Solution Design:**
+**2. Comprehensive Solution Design:**
 - Step-by-step implementation strategy
 - Technical architecture and design patterns
 - Resource allocation and timeline considerations
 - Integration points and dependencies
 
-**4. Innovation Opportunities:**
+**3. Innovation Opportunities:**
 - Novel applications of existing technologies
 - Creative combinations of different approaches
 - Potential for breakthrough solutions
 - Future-oriented considerations
 
-**5. Risk-Benefit Analysis:**
+**4. Risk-Benefit Analysis:**
 - Comprehensive risk assessment
 - Mitigation strategies and contingency plans
 - Expected benefits and success metrics
 - Long-term implications and sustainability
 
-**6. Implementation Roadmap:**
+**5. Implementation Roadmap:**
 - Phased approach with milestones
 - Critical success factors
 - Monitoring and evaluation criteria
 - Adaptation and evolution strategies
+
+**6. Knowledge Resources:**
+- Key references and documentation
+- Communities and expert networks
+- Tools and frameworks to leverage
+- Continuous learning recommendations
 
 Think outside the box while maintaining practical applicability."""
 
         # Update context for solution proposal
         solution_context = context.model_copy()
         solution_context.task_type = TaskType.ANALYSIS
-        solution_context.agent_role = "specialist"
-        
+        solution_context.agent_role = "research_specialist"
+
         return await self.generate(solution_prompt, solution_context)
-    
+
     async def research_topic(self, topic: str, focus_areas: List[str], context: TaskContext) -> AgentResponse:
         """Conduct comprehensive research using Gemini's analytical capabilities."""
         focus_text = "\n".join(f"- {area}" for area in focus_areas) if focus_areas else "Comprehensive overview"
-        
+
         research_prompt = f"""Conduct an in-depth research analysis on the following topic:
 
 **Research Topic:** {topic}
@@ -528,133 +279,177 @@ Please provide comprehensive research covering:
 - Common pitfalls and how to avoid them
 - Best practices and guidelines
 
-**7. Research Resources:**
-- Key publications and authorities
-- Important tools and frameworks
+**7. Resource Compilation:**
+- Essential tools and frameworks
+- Key documentation and references
 - Learning resources and communities
-- Standards organizations and bodies
+- Standards and specifications
 
-Provide thorough, well-researched insights with multiple perspectives and practical implications."""
+Provide authoritative, well-researched information with practical insights."""
 
         # Update context for research task
         research_context = context.model_copy()
         research_context.task_type = TaskType.RESEARCH
         research_context.agent_role = "researcher"
-        
+
         return await self.generate(research_prompt, research_context)
-    
-    async def brainstorm_alternatives(self, problem: str, current_approach: str, context: TaskContext) -> AgentResponse:
-        """Brainstorm alternative approaches using Gemini's creative thinking."""
-        brainstorm_prompt = f"""Help brainstorm creative alternative approaches to solve this problem:
 
-**Problem:** {problem}
+    async def generate_documentation(self, topic: str, audience: str, context: TaskContext) -> AgentResponse:
+        """Generate comprehensive documentation using Gemini."""
+        doc_prompt = f"""Create comprehensive documentation for:
 
-**Current Approach:** {current_approach}
+**Topic:** {topic}
+**Target Audience:** {audience}
 
-Please provide creative brainstorming including:
+Please generate documentation that includes:
 
-**1. Alternative Paradigms:**
-- Completely different approaches to the problem
-- Paradigm shifts and reframing techniques
-- Cross-industry inspirations and analogies
-- Unconventional methodologies and perspectives
+**1. Executive Summary:**
+- High-level overview
+- Key benefits and value proposition
+- Quick start guide
 
-**2. Technology Alternatives:**
-- Different technology stacks and platforms
-- Emerging technologies that could be applied
-- Hybrid approaches combining multiple technologies
-- Low-tech and high-tech alternative solutions
+**2. Detailed Content:**
+- Step-by-step instructions
+- Technical specifications
+- Configuration examples
+- Best practices
 
-**3. Process Innovations:**
-- Alternative workflows and methodologies
-- Innovative process designs and optimizations
-- Automation vs. manual approach trade-offs
-- Collaborative and distributed approaches
+**3. Visual Elements:**
+- Diagrams and flowcharts (described in text)
+- Code examples and snippets
+- Configuration files
+- Screenshots descriptions
 
-**4. Creative Solutions:**
-- Out-of-the-box thinking and innovations
-- Artistic and design-thinking approaches
-- Gamification and engagement strategies
-- Social and community-driven solutions
+**4. Troubleshooting:**
+- Common issues and solutions
+- Debugging approaches
+- FAQ section
+- Support resources
 
-**5. Resource Optimization:**
-- Cost-effective alternative approaches
-- Resource-constrained solutions
-- Sustainability and environmental considerations
-- Scalability and efficiency improvements
+**5. Advanced Topics:**
+- Customization options
+- Integration guides
+- Performance optimization
+- Security considerations
 
-**6. Implementation Variations:**
-- Phased vs. big-bang approaches
-- Incremental vs. revolutionary changes
-- Top-down vs. bottom-up strategies
-- Centralized vs. distributed implementations
+**6. References:**
+- Additional resources
+- Related documentation
+- Standards and specifications
+- Community resources
 
-Think creatively and propose diverse alternatives that challenge conventional approaches."""
+Make it comprehensive, well-structured, and appropriate for the target audience."""
 
-        # Update context for brainstorming
-        brainstorm_context = context.model_copy()
-        brainstorm_context.task_type = TaskType.RESEARCH
-        brainstorm_context.agent_role = "researcher"
-        
-        return await self.generate(brainstorm_prompt, brainstorm_context)
-    
+        doc_context = context.model_copy()
+        doc_context.task_type = TaskType.DOCUMENTATION
+        doc_context.agent_role = "technical_writer"
+
+        return await self.generate(doc_prompt, doc_context)
+
     async def health_check(self) -> Dict[str, Any]:
-        """Perform health check specific to Gemini."""
+        """Check Gemini agent health and connectivity."""
         try:
-            # Test basic functionality
-            test_context = TaskContext(
-                task_id="health_check",
-                task_type=TaskType.CUSTOM,
-                timeout_seconds=30
-            )
-            
             start_time = time.time()
-            response = await self.generate("Respond with 'Gemini health check successful'", test_context)
-            execution_time = time.time() - start_time
-            
-            health_info = {
-                "status": "healthy" if response.success else "unhealthy",
-                "agent_type": self.agent_type.value,
-                "agent_name": self.name,
+
+            # Simple test request
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents="Hello, this is a health check. Please respond with 'OK'.",
+                config=types.GenerateContentConfig(
+                    max_output_tokens=10,
+                    temperature=0.0
+                )
+            )
+
+            response_time = time.time() - start_time
+
+            return {
+                "status": "healthy",
                 "model": self.model,
-                "api_key_configured": bool(self.api_key),
-                "response_time_ms": execution_time * 1000,
-                "test_response_success": response.success,
-                "test_cost_usd": response.cost_usd,
-                "test_tokens_used": response.tokens_used,
-                "safety_settings_count": len(self.safety_settings),
-                "capabilities_count": len(self._capabilities),
-                "performance_metrics": self.performance_metrics
+                "response_time": response_time,
+                "last_check": time.time(),
+                "capabilities": self.capabilities
             }
-            
-            if not response.success:
-                health_info["error"] = response.error_message
-                health_info["safety_blocked"] = response.metadata.get("safety_blocked", False)
-            
-            return health_info
-            
+
         except Exception as e:
-            self.logger.error(f"Gemini health check failed: {e}")
+            logger.error(f"Gemini health check failed: {e}")
             return {
                 "status": "unhealthy",
-                "agent_type": self.agent_type.value,
-                "agent_name": self.name,
                 "error": str(e),
-                "model": self.model,
-                "api_key_configured": bool(self.api_key),
-                "performance_metrics": self.performance_metrics
+                "last_check": time.time()
             }
-    
-    async def shutdown(self) -> None:
-        """Shutdown Gemini agent and cleanup resources."""
-        self.logger.info("Shutting down Gemini agent")
-        
-        # Close the client if it has cleanup methods
-        if hasattr(self.client, 'close'):
-            try:
-                await self.client.close()
-            except Exception as e:
-                self.logger.warning(f"Error closing Gemini client: {e}")
-        
-        # Call parent shutdown
-        await super().shutdown()
+
+    def _build_config(self, context: TaskContext) -> types.GenerateContentConfig:
+        """Build generation config based on context."""
+        config = types.GenerateContentConfig(
+            max_output_tokens=self.default_config.max_output_tokens,
+            temperature=self.default_config.temperature,
+            top_p=self.default_config.top_p,
+            top_k=self.default_config.top_k,
+        )
+
+        # Adjust config based on task type
+        if context.task_type == TaskType.CODE_GENERATION:
+            config.temperature = 0.3  # More deterministic for code
+        elif context.task_type == TaskType.CREATIVE:
+            config.temperature = 0.9  # More creative
+        elif context.task_type == TaskType.RESEARCH:
+            config.temperature = 0.7  # Balanced for research
+
+        return config
+
+    def _get_system_instruction(self, context: TaskContext) -> Optional[str]:
+        """Get system instruction based on context."""
+        instructions = {
+            TaskType.RESEARCH: "You are a comprehensive research specialist. Provide thorough, well-researched analysis with citations and practical insights.",
+            TaskType.DOCUMENTATION: "You are a technical documentation expert. Create clear, comprehensive documentation that is well-structured and user-friendly.",
+            TaskType.CREATIVE: "You are a creative problem-solver. Think outside the box and propose innovative solutions while maintaining practical applicability.",
+            TaskType.ANALYSIS: "You are an analytical expert. Provide deep, systematic analysis with multiple perspectives and actionable insights.",
+            TaskType.CODE_REVIEW: "You are a research-oriented code reviewer. Focus on best practices, innovative approaches, and comprehensive improvement suggestions."
+        }
+
+        return instructions.get(context.task_type)
+
+    def _calculate_confidence(self, response) -> float:
+        """Calculate confidence score based on response quality."""
+        try:
+            # Base confidence
+            confidence = 0.8
+
+            # Adjust based on safety ratings
+            if hasattr(response, 'candidates') and response.candidates:
+                candidate = response.candidates[0]
+
+                # Check finish reason
+                if hasattr(candidate, 'finish_reason'):
+                    if candidate.finish_reason == "STOP":
+                        confidence += 0.1
+                    elif candidate.finish_reason in ["MAX_TOKENS", "SAFETY"]:
+                        confidence -= 0.2
+
+                # Check content length (longer usually indicates more thoughtful response)
+                if hasattr(candidate, 'content') and candidate.content.parts:
+                    content_length = len(candidate.content.parts[0].text)
+                    if content_length > 1000:
+                        confidence += 0.1
+
+            return min(1.0, max(0.0, confidence))
+
+        except Exception:
+            return 0.7  # Default confidence
+
+    def _extract_safety_ratings(self, response) -> List[Dict[str, Any]]:
+        """Extract safety ratings from response."""
+        try:
+            safety_ratings = []
+            if hasattr(response, 'candidates') and response.candidates:
+                candidate = response.candidates[0]
+                if hasattr(candidate, 'safety_ratings'):
+                    for rating in candidate.safety_ratings:
+                        safety_ratings.append({
+                            "category": rating.category,
+                            "probability": rating.probability
+                        })
+            return safety_ratings
+        except Exception:
+            return []

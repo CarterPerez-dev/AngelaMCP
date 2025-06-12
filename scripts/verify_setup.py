@@ -1,220 +1,247 @@
 #!/usr/bin/env python3
 """
 Setup verification script for AngelaMCP.
-Verifies that all required components are properly configured.
+
+This checks all components and dependencies to ensure the Dockerized
+environment is working correctly.
 """
 
 import asyncio
-import logging
 import sys
-import shutil
+import os
 import subprocess
+import time
 from pathlib import Path
+from typing import Dict, List, Tuple, Any
+import inspect # We need this to check for async functions
 
-# Add project root to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# --- Add project root to path ---
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
 
-from config.settings import settings
-from src.persistence.database import DatabaseManager
-from src.agents.claude_agent import ClaudeCodeAgent
-from src.agents.openai_agent import OpenAIAgent
-from src.agents.gemini_agent import GeminiAgent
+# --- Color codes for terminal output ---
+class Colors:
+    GREEN = "\033[92m"
+    RED = "\033[91m"
+    YELLOW = "\033[93m"
+    BLUE = "\033[94m"
+    CYAN = "\033[96m"
+    MAGENTA = "\033[95m"
+    END = "\033[0m"
+    BOLD = "\033[1m"
+    UNDERLINE = "\033[4m"
 
-
-class SetupVerifier:
-    """Verifies AngelaMCP setup and configuration."""
-    
+# --- Main Verifier Class ---
+class AngelaMCPVerifier:
     def __init__(self):
-        self.logger = logging.getLogger(__name__)
-        self.errors = []
-        self.warnings = []
-    
-    def check_python_version(self):
-        """Check Python version."""
-        version = sys.version_info
-        if version.major < 3 or (version.major == 3 and version.minor < 10):
-            self.errors.append(f"Python 3.10+ required, found {version.major}.{version.minor}")
-        else:
-            self.logger.info(f"✅ Python version: {version.major}.{version.minor}.{version.micro}")
-    
-    def check_claude_code(self):
-        """Check Claude Code installation."""
+        self.results = []
+        # Import settings here so path is set
         try:
-            if settings.claude_code_path.exists():
-                result = subprocess.run([str(settings.claude_code_path), "--version"], 
-                                      capture_output=True, text=True, timeout=10)
-                if result.returncode == 0:
-                    self.logger.info(f"✅ Claude Code: {result.stdout.strip()}")
-                else:
-                    self.errors.append("Claude Code found but not responding correctly")
-            else:
-                # Try to find in PATH
-                claude_path = shutil.which("claude")
-                if claude_path:
-                    self.logger.info(f"✅ Claude Code found in PATH: {claude_path}")
-                else:
-                    self.errors.append("Claude Code not found. Please install from https://claude.ai/code")
+            from config.settings import settings
+            self.settings = settings
         except Exception as e:
-            self.errors.append(f"Error checking Claude Code: {e}")
-    
-    def check_environment_variables(self):
-        """Check required environment variables."""
-        required_vars = [
-            ("OPENAI_API_KEY", "OpenAI API key"),
-            ("GOOGLE_API_KEY", "Google Gemini API key"),
-            ("DATABASE_URL", "Database URL"),
-            ("REDIS_URL", "Redis URL")
-        ]
+            print(f"{Colors.RED}❌ Critical Error: Could not load settings. Check .env and config/settings.py.{Colors.END}")
+            print(f"   Details: {e}")
+            sys.exit(1)
+
+    # --- THIS IS THE CORRECTED run_check METHOD ---
+    async def run_check(self, name: str, check_func, *args, **kwargs) -> bool:
+        """Runs a single check and prints the result, handling both sync and async functions."""
+        print(f"  {Colors.CYAN}Checking {name}...{Colors.END}", end='', flush=True)
+        padding = 40 - len(name)
+        print("." * padding, end='', flush=True)
         
-        for var_name, description in required_vars:
-            value = getattr(settings, var_name.lower(), None)
-            if not value or (hasattr(value, 'get_secret_value') and not value.get_secret_value()):
-                self.errors.append(f"Missing {description} ({var_name})")
-            else:
-                # Don't log actual API keys
-                if "key" in var_name.lower():
-                    self.logger.info(f"✅ {description}: configured")
-                else:
-                    self.logger.info(f"✅ {description}: {value}")
-    
-    async def check_database_connection(self):
-        """Check database connectivity."""
         try:
-            db_manager = DatabaseManager()
-            await db_manager.initialize()
+            # Check if the function is async and await it if so
+            if inspect.iscoroutinefunction(check_func):
+                status, message = await check_func(*args, **kwargs)
+            else:
+                status, message = check_func(*args, **kwargs) # Run it synchronously
             
-            # Test connection
-            session = await db_manager.get_session()
-            await session.execute("SELECT 1")
-            await db_manager.close()
-            
-            self.logger.info("✅ Database connection: successful")
+            if status == "PASS":
+                print(f" {Colors.GREEN}[  OK  ]{Colors.END}")
+                if message: print(f"    {Colors.GREEN}└─> {message}{Colors.END}")
+                self.results.append(True)
+                return True
+            elif status == "WARN":
+                print(f" {Colors.YELLOW}[ WARN ]{Colors.END}")
+                if message: print(f"    {Colors.YELLOW}└─> {message}{Colors.END}")
+                self.results.append(True) # Warnings don't cause failure
+                return True
+            else: # FAIL
+                print(f" {Colors.RED}[ FAIL ]{Colors.END}")
+                if message: print(f"    {Colors.RED}└─> {message}{Colors.END}")
+                self.results.append(False)
+                return False
         except Exception as e:
-            self.errors.append(f"Database connection failed: {e}")
+            print(f" {Colors.RED}[ ERROR ]{Colors.END}")
+            print(f"    {Colors.RED}└─> An unexpected error occurred: {e}{Colors.END}")
+            self.results.append(False)
+            return False
+
+    def check_python_version(self) -> Tuple[str, str]:
+        """Checks Python version."""
+        v = sys.version_info
+        if v >= (3, 10):
+            return "PASS", f"Python {v.major}.{v.minor}.{v.micro}"
+        return "FAIL", f"Python version is {v.major}.{v.minor}. Require 3.10+"
+
+    def check_dependencies(self) -> Tuple[str, str]:
+        """Checks if required packages are installed in the venv."""
+        try:
+            with open(project_root / "requirements.txt") as f:
+                reqs = [line.strip().split('==')[0] for line in f if line.strip() and not line.startswith('#')]
+            
+            import_map = {'psycopg2-binary': 'psycopg2', 'google-generativeai': 'google.genai'}
+            
+            missing = []
+            for req in reqs:
+                try:
+                    __import__(import_map.get(req, req))
+                except ImportError:
+                    missing.append(req)
+
+            if not missing:
+                return "PASS", f"{len(reqs)} dependencies are installed."
+            return "FAIL", f"Missing packages: {', '.join(missing)}. Run 'make install'."
+        except FileNotFoundError:
+            return "FAIL", "requirements.txt not found."
     
-    async def check_redis_connection(self):
-        """Check Redis connectivity."""
+    def check_env_file(self) -> Tuple[str, str]:
+        """Checks for .env file."""
+        if not (project_root / ".env").exists():
+            return "FAIL", "'.env' file not found. Copy '.env.example' and fill it out."
+        return "PASS", "'.env' file found."
+
+    def check_api_keys(self) -> Tuple[str, str]:
+        """Checks if API keys seem to be configured."""
+        missing_keys = []
+        if 'your-' in str(self.settings.openai_api_key) or not str(self.settings.openai_api_key):
+            missing_keys.append("OPENAI_API_KEY")
+        if 'your-' in str(self.settings.google_api_key) or not str(self.settings.google_api_key):
+            missing_keys.append("GOOGLE_API_KEY")
+        
+        if not missing_keys:
+            return "PASS", "OpenAI & Google API keys seem to be set."
+        return "WARN", f"API keys might be missing or placeholders: {', '.join(missing_keys)}"
+
+    def check_docker_running(self) -> Tuple[str, str]:
+        """Checks if the Docker daemon is running."""
+        try:
+            result = subprocess.run(["docker", "ps"], capture_output=True, check=True)
+            return "PASS", "Docker daemon is running."
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            return "FAIL", "Docker daemon is not running or 'docker' command is not in PATH."
+
+    def check_project_containers(self) -> Tuple[str, str]:
+        """Checks if the required project containers are running."""
+        required = ["angelamcp", "angelamcp_postgres", "angelamcp_redis"]
+        try:
+            result = subprocess.run(["docker", "ps", "--format", "{{.Names}}"], capture_output=True, text=True, check=True)
+            running_containers = result.stdout.strip().split('\n')
+            
+            missing = [name for name in required if name not in running_containers]
+            
+            if not missing:
+                return "PASS", "All project containers are running."
+            return "FAIL", f"Missing containers: {', '.join(missing)}. Run 'make docker-up'."
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            return "FAIL", "Could not check Docker containers. Is Docker running?"
+
+    # --- THIS IS THE CORRECTED DB CONNECTION CHECK ---
+    async def check_db_connection(self) -> Tuple[str, str]:
+        """Checks database connectivity via asyncpg."""
+        try:
+            # The asyncpg library does not understand "+asyncpg", so we remove it for the test.
+            # SQLAlchemy still needs it, but this direct test does not.
+            connect_url = str(self.settings.database_url).replace("+asyncpg", "")
+            
+            import asyncpg
+            conn = await asyncio.wait_for(asyncpg.connect(connect_url), timeout=5)
+            version = await conn.fetchval("SELECT version()")
+            await conn.close()
+            return "PASS", f"Connected to PostgreSQL ({version.split(' ')[1]})."
+        except Exception as e:
+            return "FAIL", f"Could not connect to database in Docker. Details: {e}"
+
+    async def check_redis_connection(self) -> Tuple[str, str]:
+        """Checks Redis connectivity."""
         try:
             import redis.asyncio as redis
-            
-            r = redis.from_url(settings.redis_url)
-            await r.ping()
-            await r.close()
-            
-            self.logger.info("✅ Redis connection: successful")
+            r = redis.from_url(str(self.settings.redis_url))
+            await asyncio.wait_for(r.ping(), timeout=5)
+            await r.aclose() # Use aclose() for newer versions
+            return "PASS", "Connected to Redis."
         except Exception as e:
-            self.errors.append(f"Redis connection failed: {e}")
-    
-    async def check_ai_agents(self):
-        """Check AI agent configurations."""
-        # Check OpenAI
-        try:
-            openai_agent = OpenAIAgent()
-            # Don't actually make API calls during verification
-            self.logger.info("✅ OpenAI agent: configured")
-        except Exception as e:
-            self.errors.append(f"OpenAI agent configuration error: {e}")
-        
-        # Check Gemini
-        try:
-            gemini_agent = GeminiAgent()
-            self.logger.info("✅ Gemini agent: configured")
-        except Exception as e:
-            self.errors.append(f"Gemini agent configuration error: {e}")
-        
-        # Check Claude Code agent
-        try:
-            claude_agent = ClaudeCodeAgent()
-            self.logger.info("✅ Claude Code agent: configured")
-        except Exception as e:
-            self.errors.append(f"Claude Code agent configuration error: {e}")
-    
-    def check_directories(self):
-        """Check required directories exist."""
-        dirs_to_check = [
-            settings.workspace_dir,
-            settings.claude_session_dir,
-            settings.log_file.parent
-        ]
-        
-        for directory in dirs_to_check:
-            try:
-                directory.mkdir(parents=True, exist_ok=True)
-                self.logger.info(f"✅ Directory: {directory}")
-            except Exception as e:
-                self.errors.append(f"Cannot create directory {directory}: {e}")
-    
-    def check_system_resources(self):
-        """Check system resources."""
-        try:
-            import psutil
-            
-            # Check memory
-            memory = psutil.virtual_memory()
-            if memory.total < 2 * 1024 * 1024 * 1024:  # 2GB
-                self.warnings.append("Low system memory (< 2GB)")
-            else:
-                self.logger.info(f"✅ System memory: {memory.total // (1024**3)}GB")
-            
-            # Check disk space
-            disk = psutil.disk_usage('/')
-            if disk.free < 1 * 1024 * 1024 * 1024:  # 1GB
-                self.warnings.append("Low disk space (< 1GB free)")
-            else:
-                self.logger.info(f"✅ Disk space: {disk.free // (1024**3)}GB free")
-                
-        except ImportError:
-            self.warnings.append("psutil not available for system resource checking")
-        except Exception as e:
-            self.warnings.append(f"Error checking system resources: {e}")
-    
-    async def run_verification(self):
-        """Run all verification checks."""
-        self.logger.info("🔍 Starting AngelaMCP setup verification...")
-        self.logger.info("=" * 60)
-        
-        # Run all checks
-        self.check_python_version()
-        self.check_claude_code()
-        self.check_environment_variables()
-        await self.check_database_connection()
-        await self.check_redis_connection()
-        await self.check_ai_agents()
-        self.check_directories()
-        self.check_system_resources()
-        
-        # Summary
-        self.logger.info("=" * 60)
-        
-        if self.errors:
-            self.logger.error("❌ Verification failed with errors:")
-            for error in self.errors:
-                self.logger.error(f"  • {error}")
-            return False
-        
-        if self.warnings:
-            self.logger.warning("⚠️  Verification completed with warnings:")
-            for warning in self.warnings:
-                self.logger.warning(f"  • {warning}")
-        
-        self.logger.info("✅ All checks passed! AngelaMCP is ready to run.")
-        self.logger.info("\nTo start AngelaMCP, run: make run")
-        return True
+            return "FAIL", f"Could not connect to Redis in Docker. Details: {e}"
+
+def print_header():
+    """Prints the cool header."""
+    print(f"{Colors.BOLD}{Colors.MAGENTA}")
+    print("⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⣠⠤⠶⠶⠶⠤⠤⣀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀")
+    print("⠀⠀⠀⠀⠀⠀⠀⠀⢀⡤⠚⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠙⠦⣄⠀⠀⠀⠀⠀⠀⠀⠀")
+    print("⠀⠀⠀⠀⠀⠀⠀⣠⠟⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠙⢦⡀⠀⠀⠀⠀⠀⠀")
+    print("⠀⠀⠀⠀⠀⠀⣰⠃⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠹⣆⠀⠀⠀⠀⠀")
+    print("⠀⠀⠀⠀⠀⢠⠇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠘⣧⠀⠀⠀⠀")
+    print("AngelaMCP ─ │⠀⢀⣠⠤⠶⠒⠒⠒⠒⠶⠥⠤⣀⡀⠀⢀⣀⠠⠤⠶⠒⠒⠒⠶⠬⣑⡀⠀│ ─ Verifier")
+    print("⠀⠀⠀⠀⠀⠸⡄⠸⡁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠙⢦⣬⠞⠁⠀⠀⠀⠀⠀⠀⠀⠀⢈⡗⠀⢸⠀⠀⠀⠀")
+    print("⠀⠀⠀⠀⠀⠀⠙⠦⣝⠒⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠚⣁⡤⠚⠀⠀⠀⠀")
+    print("⠀⠀⠀⠀⠀⠀⠀⠀⠈⠉⠒⠒⠦⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠴⠒⠋⠉⠀⠀⠀⠀⠀⠀⠀")
+    print(f"{Colors.END}")
+
+def print_success_footer():
+    """Prints the very cool success message."""
+    print(f"\n{Colors.BOLD}{Colors.GREEN}==============================================================={Colors.END}")
+    print(f"{Colors.BOLD}{Colors.GREEN}█▀▀ █░█ █▀▀ █▀▀ ▄▀█ █▀ █▀   █▀ ▄▀█ █▄█ █▀▀   █▀▄▀█ █▀▀ ▀█▀ █▀█{Colors.END}")
+    print(f"{Colors.BOLD}{Colors.GREEN}█▄▄ █▀█ ██▄ ██▄ █▀█ ▄█ ▄█   ▄█ █▀█ ░█░ ██▄   █░█░█ ██▄ ░█░ █▄█{Colors.END}")
+    print(f"{Colors.BOLD}{Colors.GREEN}==============================================================={Colors.END}")
+    print(f"\n{Colors.CYAN}All systems operational. AngelaMCP is ready for deployment.{Colors.END}\n")
+    print("  To start the application, run: " + f"{Colors.YELLOW}make run{Colors.END}")
+    print("  To run as an MCP server, use: " + f"{Colors.YELLOW}make run-mcp{Colors.END}\n")
+
+def print_failure_footer():
+    """Prints the failure message."""
+    print(f"\n{Colors.BOLD}{Colors.RED}==============================================================={Colors.END}")
+    print(f"{Colors.BOLD}{Colors.RED}                             SETUP FAILED                             {Colors.END}")
+    print(f"{Colors.BOLD}{Colors.RED}==============================================================={Colors.END}")
+    print(f"\n{Colors.YELLOW}Please fix the [ FAIL ] checks above before proceeding.{Colors.END}\n")
 
 
 async def main():
     """Main verification function."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(message)s'
-    )
+    print_header()
+    time.sleep(1) # For dramatic effect
     
-    verifier = SetupVerifier()
-    success = await verifier.run_verification()
+    verifier = AngelaMCPVerifier()
+
+    print(f"\n{Colors.BOLD}{Colors.UNDERLINE}Phase 1: Local Environment Checks{Colors.END}")
+    await verifier.run_check("Python Version", verifier.check_python_version)
+    await verifier.run_check("Python Dependencies", verifier.check_dependencies)
+    await verifier.run_check("Environment File (.env)", verifier.check_env_file)
+    await verifier.run_check("API Key Configuration", verifier.check_api_keys)
     
-    if not success:
-        sys.exit(1)
+    print(f"\n{Colors.BOLD}{Colors.UNDERLINE}Phase 2: Docker Environment Checks{Colors.END}")
+    await verifier.run_check("Docker Service", verifier.check_docker_running)
+    await verifier.run_check("Project Containers", verifier.check_project_containers)
+
+    print(f"\n{Colors.BOLD}{Colors.UNDERLINE}Phase 3: Service Connectivity Checks{Colors.END}")
+    await verifier.run_check("Database (PostgreSQL) Connection", verifier.check_db_connection)
+    await verifier.run_check("Cache (Redis) Connection", verifier.check_redis_connection)
+
+    if all(verifier.results):
+        print_success_footer()
+        return True
+    else:
+        print_failure_footer()
+        return False
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    is_success = False
+    try:
+        is_success = asyncio.run(main())
+    except KeyboardInterrupt:
+        print(f"\n{Colors.YELLOW}Verification interrupted by user.{Colors.END}")
+        sys.exit(1)
+    
+    sys.exit(0 if is_success else 1)

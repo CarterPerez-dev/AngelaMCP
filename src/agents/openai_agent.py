@@ -1,291 +1,121 @@
 """
-OpenAI agent implementation for AngelaMCP.
+OpenAI Agent implementation for AngelaMCP.
 
-This module implements the OpenAI agent wrapper using the o3-mini model with
-comprehensive error handling, retry logic, and cost tracking. I'm implementing
-a production-grade client that supports both review and research roles.
+This agent specializes in code review, analysis, and quality assessment.
+I'm implementing this as the "code reviewer" with focus on best practices and security.
 """
 
 import asyncio
 import time
-import tiktoken
-from typing import Dict, Any, List, Optional
+import json
+from typing import List, Dict, Any, Optional
 
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletion
-from openai._exceptions import (
-    OpenAIError, RateLimitError, APITimeoutError, 
-    APIConnectionError, AuthenticationError
-)
 
-from .base import (
-    BaseAgent, AgentType, AgentResponse, TaskContext, TaskType,
-    AgentCapability, AgentError, AgentRateLimitError, 
-    AgentTimeoutError, AgentAuthenticationError
-)
-from src.utils.logger import get_logger, log_agent_interaction, AsyncPerformanceLogger
+from src.agents.base import BaseAgent, AgentType, AgentResponse, TaskContext, TaskType
+from src.utils.logger import get_logger
+from src.utils.exceptions import AgentError
 from config.settings import settings
-
-logger = get_logger("agents.openai")
-
-
-class OpenAIError(AgentError):
-    """Specific error for OpenAI operations."""
-    pass
 
 
 class OpenAIAgent(BaseAgent):
     """
-    OpenAI agent implementation using o3-mini model.
+    OpenAI agent specializing in code review and analysis.
     
-    I'm implementing a comprehensive OpenAI client that provides review and research
-    capabilities with proper cost tracking, retry logic, and error handling.
+    Capabilities:
+    - Code quality assessment
+    - Security analysis  
+    - Performance optimization
+    - Best practices review
+    - Detailed technical analysis
     """
     
-    def __init__(self, name: str = "openai", api_key: Optional[str] = None):
-        super().__init__(AgentType.OPENAI, name, settings)
+    def __init__(self):
+        super().__init__(
+            agent_type=AgentType.OPENAI,
+            name="OpenAI Code Reviewer",
+            capabilities=[
+                "code_review",
+                "security_analysis",
+                "performance_optimization", 
+                "best_practices",
+                "technical_analysis",
+                "quality_assessment"
+            ]
+        )
         
-        # OpenAI configuration
-        self.api_key = api_key or settings.openai_api_key.get_secret_value()
+        # Initialize OpenAI client
+        self.client = AsyncOpenAI(api_key=settings.openai_api_key)
         self.model = settings.openai_model
         self.max_tokens = settings.openai_max_tokens
         self.temperature = settings.openai_temperature
-        self.top_p = settings.openai_top_p
-        self.frequency_penalty = settings.openai_frequency_penalty
-        self.presence_penalty = settings.openai_presence_penalty
+        self.max_retries = settings.openai_max_retries
+        self.retry_delay = settings.openai_retry_delay
         
-        # Initialize OpenAI client
-        self.client = AsyncOpenAI(
-            api_key=self.api_key,
-            timeout=self.timeout
-        )
-        
-        # Token encoding for cost calculation
-        try:
-            self.encoding = tiktoken.encoding_for_model(self.model)
-        except KeyError:
-            # Fallback to cl100k_base for newer models
-            self.encoding = tiktoken.get_encoding("cl100k_base")
-        
-        # Cost tracking (per 1K tokens)
-        self.input_cost_per_1k = settings.openai_input_cost
-        self.output_cost_per_1k = settings.openai_output_cost
-        
-        # Define capabilities
-        self._setup_capabilities()
-        
-        self.logger.info(f"OpenAI agent initialized with model: {self.model}")
-    
-    def _setup_capabilities(self) -> None:
-        """Define OpenAI agent capabilities."""
-        self._capabilities = [
-            AgentCapability(
-                name="text_generation",
-                description="Generate high-quality text responses",
-                supported_formats=["text", "markdown", "json"],
-                limitations=["Context length limits", "No real-time information"],
-                cost_per_request=0.006  # Estimated average cost
-            ),
-            AgentCapability(
-                name="code_review",
-                description="Review and critique code for quality and best practices",
-                supported_formats=["python", "javascript", "typescript", "java", "cpp"],
-                limitations=["Cannot execute code", "Limited to static analysis"],
-                cost_per_request=0.008
-            ),
-            AgentCapability(
-                name="research_analysis",
-                description="Analyze and synthesize information on technical topics",
-                supported_formats=["text", "structured_data"],
-                limitations=["No access to real-time data", "Knowledge cutoff limitations"],
-                cost_per_request=0.012
-            ),
-            AgentCapability(
-                name="problem_solving",
-                description="Break down complex problems and propose solutions",
-                supported_formats=["text", "structured_analysis"],
-                limitations=["Cannot verify solutions practically"],
-                cost_per_request=0.010
-            ),
-            AgentCapability(
-                name="structured_output",
-                description="Generate structured JSON responses",
-                supported_formats=["json", "yaml"],
-                limitations=["Schema complexity limits"],
-                cost_per_request=0.007
-            )
-        ]
-    
-    def _count_tokens(self, text: str) -> int:
-        """Count tokens in text using the model's encoding."""
-        try:
-            return len(self.encoding.encode(text))
-        except Exception as e:
-            # Fallback to rough estimation
-            self.logger.warning(f"Token counting failed: {e}")
-            return len(text.split()) * 1.3  # Rough approximation
-    
-    def _calculate_cost(self, input_tokens: int, output_tokens: int) -> float:
-        """Calculate cost based on token usage."""
-        input_cost = (input_tokens / 1000) * self.input_cost_per_1k
-        output_cost = (output_tokens / 1000) * self.output_cost_per_1k
-        return input_cost + output_cost
-    
-    def _build_messages(self, prompt: str, context: TaskContext, system_prompt: Optional[str] = None) -> List[Dict[str, str]]:
-        """Build messages array for OpenAI chat completion."""
-        messages = []
-        
-        # System message
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        elif context.agent_role.value == "reviewer":
-            messages.append({
-                "role": "system", 
-                "content": "You are an expert code reviewer and technical analyst. Provide thorough, constructive feedback focusing on code quality, best practices, potential issues, and improvement suggestions. Be specific and actionable in your recommendations."
-            })
-        elif context.agent_role.value == "researcher":
-            messages.append({
-                "role": "system",
-                "content": "You are a technical researcher and analyst. Provide comprehensive analysis, gather relevant information, and synthesize findings into clear, actionable insights. Focus on accuracy, thoroughness, and practical applicability."
-            })
-        else:
-            messages.append({
-                "role": "system",
-                "content": "You are a helpful AI assistant specializing in software development and technical problem-solving. Provide clear, accurate, and practical responses."
-            })
-        
-        # User message
-        messages.append({"role": "user", "content": prompt})
-        
-        return messages
-    
-    async def _make_completion_request(self, messages: List[Dict[str, str]], context: TaskContext) -> ChatCompletion:
-        """Make a chat completion request to OpenAI."""
-        try:
-            completion = await self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                max_tokens=context.max_tokens or self.max_tokens,
-                temperature=context.temperature or self.temperature,
-                top_p=self.top_p,
-                frequency_penalty=self.frequency_penalty,
-                presence_penalty=self.presence_penalty,
-                timeout=context.timeout_seconds or self.timeout
-            )
-            
-            return completion
-            
-        except RateLimitError as e:
-            raise AgentRateLimitError(
-                f"OpenAI rate limit exceeded: {e}",
-                agent_type=self.agent_type.value,
-                error_code="RATE_LIMIT_EXCEEDED"
-            ) from e
-        
-        except AuthenticationError as e:
-            raise AgentAuthenticationError(
-                f"OpenAI authentication failed: {e}",
-                agent_type=self.agent_type.value,
-                error_code="AUTHENTICATION_FAILED"
-            ) from e
-        
-        except APITimeoutError as e:
-            raise AgentTimeoutError(
-                f"OpenAI request timed out: {e}",
-                agent_type=self.agent_type.value,
-                error_code="REQUEST_TIMEOUT"
-            ) from e
-        
-        except (APIConnectionError, OpenAIError) as e:
-            raise OpenAIError(
-                f"OpenAI API error: {e}",
-                agent_type=self.agent_type.value,
-                error_code="API_ERROR"
-            ) from e
-    
-    def _parse_completion_response(self, completion: ChatCompletion, input_tokens: int, execution_time: float) -> AgentResponse:
-        """Parse OpenAI completion response into standardized format."""
-        choice = completion.choices[0]
-        content = choice.message.content or ""
-        
-        # Calculate tokens and cost
-        output_tokens = completion.usage.completion_tokens if completion.usage else self._count_tokens(content)
-        total_tokens = input_tokens + output_tokens
-        cost = self._calculate_cost(input_tokens, output_tokens)
-        
-        return AgentResponse(
-            success=True,
-            content=content,
-            agent_type=self.agent_type.value,
-            execution_time_ms=execution_time * 1000,
-            tokens_used=total_tokens,
-            cost_usd=cost,
-            metadata={
-                "model": completion.model,
-                "finish_reason": choice.finish_reason,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "openai_id": completion.id,
-                "system_fingerprint": completion.system_fingerprint,
-                "usage": completion.usage.model_dump() if completion.usage else None
-            }
-        )
+        self.logger.info(f"Initialized OpenAI agent with model: {self.model}")
     
     async def generate(self, prompt: str, context: TaskContext) -> AgentResponse:
-        """Generate a response using OpenAI."""
+        """Generate response using OpenAI with retry logic."""
         start_time = time.time()
         
-        async with AsyncPerformanceLogger(self.logger, "openai_generate", task_id=context.task_id):
-            try:
-                # Build messages and count input tokens
-                messages = self._build_messages(prompt, context)
-                input_text = "\n".join(msg["content"] for msg in messages)
-                input_tokens = self._count_tokens(input_text)
-                
-                # Make API request with retry logic
-                completion = await self.execute_with_retry(
-                    self._make_completion_request, messages, context
-                )
-                
-                execution_time = time.time() - start_time
-                response = self._parse_completion_response(completion, input_tokens, execution_time)
-                
-                # Update metrics
-                self._update_metrics(response)
-                
-                # Log interaction
-                log_agent_interaction(
-                    self.logger,
-                    self.name,
-                    "generate",
-                    input_data=prompt,
-                    output_data=response.content,
-                    metadata={
-                        "task_id": context.task_id,
-                        "model": self.model,
-                        "tokens_used": response.tokens_used,
-                        "cost_usd": response.cost_usd,
-                        "execution_time_ms": response.execution_time_ms
-                    }
-                )
-                
-                return response
-                
-            except Exception as e:
-                execution_time = time.time() - start_time
-                self.logger.error(f"OpenAI generation failed: {e}")
-                
-                return AgentResponse(
-                    success=False,
-                    content="",
-                    agent_type=self.agent_type.value,
-                    execution_time_ms=execution_time * 1000,
-                    error_message=str(e),
-                    metadata={"task_id": context.task_id, "model": self.model}
-                )
+        try:
+            # Build messages based on context
+            messages = self._build_messages(prompt, context)
+            
+            # Generate with retry logic
+            for attempt in range(self.max_retries + 1):
+                try:
+                    response = await self.client.chat.completions.create(
+                        model=self.model,
+                        messages=messages,
+                        max_tokens=self.max_tokens,
+                        temperature=self._get_temperature(context),
+                        top_p=settings.openai_top_p,
+                        frequency_penalty=settings.openai_frequency_penalty,
+                        presence_penalty=settings.openai_presence_penalty,
+                        timeout=settings.openai_timeout
+                    )
+                    
+                    # Extract response content
+                    content = response.choices[0].message.content
+                    if not content:
+                        raise AgentError("Empty response from OpenAI")
+                    
+                    execution_time = time.time() - start_time
+                    
+                    return AgentResponse(
+                        agent_type=self.agent_type,
+                        content=content,
+                        confidence=self._calculate_confidence(response),
+                        execution_time_ms=execution_time * 1000,
+                        token_usage={
+                            "prompt_tokens": response.usage.prompt_tokens,
+                            "completion_tokens": response.usage.completion_tokens,
+                            "total_tokens": response.usage.total_tokens
+                        },
+                        metadata={
+                            "model": self.model,
+                            "finish_reason": response.choices[0].finish_reason,
+                            "attempt": attempt + 1,
+                            "context": context.task_type.value
+                        }
+                    )
+                    
+                except Exception as e:
+                    if attempt < self.max_retries:
+                        self.logger.warning(f"OpenAI API error (attempt {attempt + 1}): {e}")
+                        await asyncio.sleep(self.retry_delay * (2 ** attempt))  # Exponential backoff
+                        continue
+                    else:
+                        raise AgentError(f"OpenAI API failed after {self.max_retries + 1} attempts: {e}")
+        
+        except Exception as e:
+            self.logger.error(f"OpenAI generation failed: {e}", exc_info=True)
+            raise AgentError(f"OpenAI generation error: {e}")
     
     async def critique(self, content: str, original_task: str, context: TaskContext) -> AgentResponse:
-        """Provide detailed critique using OpenAI."""
+        """Provide detailed code review and critique."""
         critique_prompt = f"""Please provide a thorough critique of the following solution for the task: "{original_task}"
 
 Solution to review:
@@ -311,26 +141,37 @@ Provide a detailed analysis including:
 - Best practices that should be applied
 - Code refactoring recommendations
 
+**Security Analysis:**
+- Potential security vulnerabilities
+- Input validation concerns
+- Authentication and authorization issues
+- Data handling security
+
+**Performance Assessment:**
+- Performance bottlenecks
+- Optimization opportunities
+- Scalability considerations
+- Resource usage analysis
+
 **Overall Assessment:**
 - Summary of solution quality
 - Readiness for production use
 - Priority of recommended changes
+- Risk assessment
 
 Focus on being constructive, specific, and actionable in your feedback."""
 
-        # Update context for critique task
         critique_context = context.model_copy()
         critique_context.task_type = TaskType.CODE_REVIEW
-        critique_context.agent_role = critique_context.agent_role or "reviewer"
+        critique_context.agent_role = "reviewer"
         
         return await self.generate(critique_prompt, critique_context)
     
-    async def propose_solution(self, task_description: str, constraints: List[str], 
-                             context: TaskContext) -> AgentResponse:
-        """Propose a solution using OpenAI's analytical capabilities."""
+    async def propose_solution(self, task_description: str, constraints: List[str], context: TaskContext) -> AgentResponse:
+        """Propose a solution with focus on best practices and quality."""
         constraints_text = "\n".join(f"- {constraint}" for constraint in constraints) if constraints else "None specified"
         
-        solution_prompt = f"""Analyze the following task and propose a comprehensive solution:
+        solution_prompt = f"""Analyze the following task and propose a comprehensive solution with emphasis on code quality, security, and best practices:
 
 **Task:** {task_description}
 
@@ -343,40 +184,61 @@ Please provide a structured solution including:
 - Break down the key requirements
 - Identify potential challenges
 - Consider edge cases and corner scenarios
+- Security implications
 
 **2. Proposed Approach:**
 - High-level solution strategy
 - Technology choices and rationale
 - Architecture considerations
+- Security-first design principles
 
 **3. Implementation Plan:**
 - Step-by-step implementation approach
 - Key components and their responsibilities
-- Integration points and dependencies
+- Error handling strategy
+- Testing approach
 
-**4. Risk Assessment:**
-- Potential risks and mitigation strategies
-- Alternative approaches if the main solution fails
-- Scalability and maintenance considerations
+**4. Code Quality Considerations:**
+- Design patterns to apply
+- Code organization principles
+- Documentation standards
+- Maintainability factors
 
-**5. Success Criteria:**
-- How to measure if the solution works
-- Testing approach and validation methods
-- Performance benchmarks
+**5. Security Assessment:**
+- Security requirements and considerations
+- Potential vulnerabilities to address
+- Authentication and authorization needs
+- Data protection measures
 
-Focus on creating a practical, well-reasoned solution that addresses all requirements while considering real-world constraints."""
+**6. Performance Optimization:**
+- Performance requirements
+- Optimization strategies
+- Scalability considerations
+- Resource management
 
-        # Update context for solution proposal
+**7. Risk Assessment:**
+- Technical risks and mitigation strategies
+- Alternative approaches if main solution fails
+- Monitoring and alerting needs
+
+**8. Testing Strategy:**
+- Unit testing approach
+- Integration testing plan
+- Security testing requirements
+- Performance testing needs
+
+Focus on creating a practical, well-reasoned solution that prioritizes security, performance, and maintainability."""
+
         solution_context = context.model_copy()
         solution_context.task_type = TaskType.ANALYSIS
         
         return await self.generate(solution_prompt, solution_context)
     
     async def research_topic(self, topic: str, focus_areas: List[str], context: TaskContext) -> AgentResponse:
-        """Research a technical topic using OpenAI's knowledge base."""
+        """Research a technical topic with focus on best practices."""
         focus_text = "\n".join(f"- {area}" for area in focus_areas) if focus_areas else "General overview"
         
-        research_prompt = f"""Conduct comprehensive research on the following topic:
+        research_prompt = f"""Conduct comprehensive research on the following topic with emphasis on practical implementation and best practices:
 
 **Topic:** {topic}
 
@@ -389,148 +251,280 @@ Please provide a thorough research analysis including:
 - Definition and key concepts
 - Current state and relevance
 - Important context and background
+- Industry standards
 
 **2. Technical Details:**
 - Core technologies and methodologies
 - Implementation approaches
 - Standards and best practices
+- Common pitfalls and how to avoid them
 
 **3. Comparative Analysis:**
 - Alternative solutions or approaches
 - Pros and cons of different methods
 - Use case scenarios for each approach
+- Performance and security implications
 
-**4. Current Trends:**
-- Recent developments and innovations
-- Industry adoption patterns
-- Future outlook and predictions
+**4. Best Practices:**
+- Industry-standard approaches
+- Security considerations
+- Performance optimization
+- Maintainability guidelines
 
-**5. Practical Applications:**
-- Real-world use cases
-- Implementation examples
-- Common pitfalls and how to avoid them
+**5. Implementation Guidance:**
+- Step-by-step implementation approaches
+- Common integration patterns
+- Testing strategies
+- Monitoring and debugging
 
-**6. Resources and References:**
-- Key tools and frameworks
-- Recommended learning resources
-- Important standards or specifications
+**6. Security Considerations:**
+- Security best practices
+- Common vulnerabilities
+- Protection strategies
+- Compliance requirements
 
-Provide accurate, up-to-date information with practical insights for implementation."""
+**7. Performance Optimization:**
+- Performance best practices
+- Optimization techniques
+- Scalability considerations
+- Resource management
 
-        # Update context for research task
+**8. Resources and Tools:**
+- Recommended tools and frameworks
+- Learning resources
+- Standards and specifications
+- Community resources
+
+Provide accurate, up-to-date information with practical insights for secure and efficient implementation."""
+
         research_context = context.model_copy()
         research_context.task_type = TaskType.RESEARCH
         research_context.agent_role = "researcher"
         
         return await self.generate(research_prompt, research_context)
     
-    async def analyze_code_quality(self, code: str, language: str, context: TaskContext) -> AgentResponse:
-        """Analyze code quality using OpenAI's expertise."""
-        analysis_prompt = f"""Perform a comprehensive code quality analysis of the following {language} code:
+    async def analyze_security(self, code: str, language: str, context: TaskContext) -> AgentResponse:
+        """Perform detailed security analysis."""
+        security_prompt = f"""Perform a comprehensive security analysis of the following {language} code:
 
 ```{language}
 {code}
 ```
 
-Provide detailed analysis covering:
+Please provide detailed security assessment covering:
 
-**1. Code Quality Metrics:**
-- Readability and maintainability
-- Complexity assessment
-- Adherence to coding standards
-- Documentation quality
+**1. Vulnerability Assessment:**
+- Identify potential security vulnerabilities
+- OWASP Top 10 considerations
+- Language-specific security issues
+- Configuration security problems
 
-**2. Best Practices Review:**
-- Language-specific best practices
-- Design patterns usage
-- Error handling approaches
-- Performance considerations
+**2. Input Validation:**
+- Input validation weaknesses
+- Injection attack vectors (SQL, XSS, etc.)
+- Parameter tampering risks
+- Data sanitization issues
 
-**3. Security Analysis:**
-- Potential security vulnerabilities
-- Input validation issues
-- Data handling concerns
-- Access control considerations
+**3. Authentication & Authorization:**
+- Authentication mechanism review
+- Authorization logic assessment
+- Session management security
+- Access control implementation
 
-**4. Optimization Opportunities:**
-- Performance improvements
-- Memory usage optimization
-- Algorithm efficiency
-- Resource management
+**4. Data Protection:**
+- Data encryption at rest and in transit
+- Sensitive data handling
+- Privacy considerations
+- Data leakage risks
 
-**5. Refactoring Suggestions:**
-- Code structure improvements
-- Function/class organization
-- Naming conventions
-- Code duplication elimination
+**5. Error Handling:**
+- Information disclosure through errors
+- Exception handling security
+- Logging security considerations
+- Debug information exposure
 
-**6. Testing Recommendations:**
-- Test coverage assessment
-- Missing test scenarios
-- Testing strategy suggestions
-- Mock and stub opportunities
+**6. Infrastructure Security:**
+- Deployment security considerations
+- Configuration management security
+- Dependency security assessment
+- Environment security
 
-Provide specific, actionable recommendations with code examples where helpful."""
+**7. Remediation Recommendations:**
+- Specific fixes for identified issues
+- Security implementation best practices
+- Secure coding guidelines
+- Testing recommendations
 
-        # Update context for code analysis
-        analysis_context = context.model_copy()
-        analysis_context.task_type = TaskType.CODE_REVIEW
-        analysis_context.agent_role = "reviewer"
+**8. Risk Assessment:**
+- Risk level classification (Critical/High/Medium/Low)
+- Impact analysis
+- Exploitability assessment
+- Mitigation priority
+
+Focus on providing actionable security improvements and specific remediation steps."""
+
+        security_context = context.model_copy()
+        security_context.task_type = TaskType.CODE_REVIEW
+        security_context.metadata["security_analysis"] = True
         
-        return await self.generate(analysis_prompt, analysis_context)
+        return await self.generate(security_prompt, security_context)
+    
+    async def optimize_performance(self, code: str, language: str, context: TaskContext) -> AgentResponse:
+        """Analyze and suggest performance optimizations."""
+        optimization_prompt = f"""Analyze the following {language} code for performance optimization opportunities:
+
+```{language}
+{code}
+```
+
+Please provide comprehensive performance analysis including:
+
+**1. Performance Analysis:**
+- Identify performance bottlenecks
+- Algorithmic complexity assessment
+- Resource usage analysis
+- Memory consumption patterns
+
+**2. Optimization Opportunities:**
+- Algorithm optimization suggestions
+- Data structure improvements
+- Caching strategies
+- Database query optimization
+
+**3. Scalability Assessment:**
+- Horizontal scaling considerations
+- Vertical scaling opportunities
+- Load handling capabilities
+- Resource contention points
+
+**4. Memory Optimization:**
+- Memory leak detection
+- Memory usage optimization
+- Garbage collection considerations
+- Resource cleanup improvements
+
+**5. I/O Optimization:**
+- File I/O improvements
+- Network I/O optimization
+- Database access optimization
+- Caching implementation
+
+**6. Concurrency Improvements:**
+- Parallel processing opportunities
+- Async/await optimization
+- Thread safety considerations
+- Lock contention reduction
+
+**7. Implementation Recommendations:**
+- Specific code improvements
+- Performance monitoring suggestions
+- Benchmarking strategies
+- Testing approaches
+
+**8. Trade-off Analysis:**
+- Performance vs readability
+- Performance vs maintainability
+- Memory vs CPU trade-offs
+- Optimization priority recommendations
+
+Provide specific, actionable performance improvements with measurable impact estimates."""
+
+        optimization_context = context.model_copy()
+        optimization_context.task_type = TaskType.ANALYSIS
+        optimization_context.metadata["performance_analysis"] = True
+        
+        return await self.generate(optimization_prompt, optimization_context)
     
     async def health_check(self) -> Dict[str, Any]:
-        """Perform health check specific to OpenAI."""
+        """Check OpenAI agent health and connectivity."""
         try:
-            # Test basic functionality
-            test_context = TaskContext(
-                task_id="health_check",
-                task_type=TaskType.CUSTOM,
-                timeout_seconds=30
+            start_time = time.time()
+            
+            # Simple test request
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "user", "content": "Respond with 'OK' for health check."}
+                ],
+                max_tokens=5,
+                temperature=0.0
             )
             
-            start_time = time.time()
-            response = await self.generate("Respond with 'OpenAI health check successful'", test_context)
-            execution_time = time.time() - start_time
+            response_time = time.time() - start_time
             
-            health_info = {
-                "status": "healthy" if response.success else "unhealthy",
-                "agent_type": self.agent_type.value,
-                "agent_name": self.name,
+            return {
+                "status": "healthy",
                 "model": self.model,
-                "api_key_configured": bool(self.api_key),
-                "response_time_ms": execution_time * 1000,
-                "test_response_success": response.success,
-                "test_cost_usd": response.cost_usd,
-                "test_tokens_used": response.tokens_used,
-                "capabilities_count": len(self._capabilities),
-                "performance_metrics": self.performance_metrics
+                "response_time": response_time,
+                "token_usage": {
+                    "prompt": response.usage.prompt_tokens,
+                    "completion": response.usage.completion_tokens,
+                    "total": response.usage.total_tokens
+                },
+                "capabilities": self.capabilities,
+                "last_check": time.time()
             }
-            
-            if not response.success:
-                health_info["error"] = response.error_message
-            
-            return health_info
             
         except Exception as e:
             self.logger.error(f"OpenAI health check failed: {e}")
             return {
                 "status": "unhealthy",
-                "agent_type": self.agent_type.value,
-                "agent_name": self.name,
                 "error": str(e),
                 "model": self.model,
-                "api_key_configured": bool(self.api_key),
-                "performance_metrics": self.performance_metrics
+                "last_check": time.time()
             }
     
-    async def shutdown(self) -> None:
-        """Shutdown OpenAI agent and cleanup resources."""
-        self.logger.info("Shutting down OpenAI agent")
+    def _build_messages(self, prompt: str, context: TaskContext) -> List[Dict[str, str]]:
+        """Build message list based on context."""
+        system_message = self._get_system_message(context)
         
-        # Close the HTTP client
-        if hasattr(self.client, 'close'):
-            await self.client.close()
+        messages = []
+        if system_message:
+            messages.append({"role": "system", "content": system_message})
         
-        # Call parent shutdown
-        await super().shutdown()
+        messages.append({"role": "user", "content": prompt})
+        
+        return messages
+    
+    def _get_system_message(self, context: TaskContext) -> Optional[str]:
+        """Get system message based on task context."""
+        system_messages = {
+            TaskType.CODE_REVIEW: "You are an expert code reviewer specializing in security, performance, and best practices. Provide thorough, constructive feedback with specific, actionable recommendations.",
+            TaskType.ANALYSIS: "You are a senior technical analyst. Provide comprehensive analysis with focus on security, performance, and architectural best practices.",
+            TaskType.RESEARCH: "You are a technical researcher specializing in best practices, security, and performance optimization. Provide thorough, practical research with actionable insights.",
+            TaskType.GENERAL: "You are a technical expert focused on code quality, security, and best practices. Provide detailed, practical guidance."
+        }
+        
+        return system_messages.get(context.task_type)
+    
+    def _get_temperature(self, context: TaskContext) -> float:
+        """Get temperature based on task context."""
+        # Lower temperature for code review and analysis
+        if context.task_type in [TaskType.CODE_REVIEW, TaskType.ANALYSIS]:
+            return 0.3
+        # Higher temperature for creative tasks
+        elif context.task_type == TaskType.CREATIVE:
+            return 0.8
+        # Default temperature
+        else:
+            return self.temperature
+    
+    def _calculate_confidence(self, response: ChatCompletion) -> float:
+        """Calculate confidence score based on response quality."""
+        confidence = 0.8  # Base confidence
+        
+        # Adjust based on finish reason
+        finish_reason = response.choices[0].finish_reason
+        if finish_reason == "stop":
+            confidence += 0.1
+        elif finish_reason == "length":
+            confidence -= 0.1
+        
+        # Adjust based on response length (longer usually indicates more thorough analysis)
+        content_length = len(response.choices[0].message.content or "")
+        if content_length > 1000:
+            confidence += 0.1
+        elif content_length < 100:
+            confidence -= 0.2
+        
+        return min(1.0, max(0.0, confidence))

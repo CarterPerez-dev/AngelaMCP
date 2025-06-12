@@ -352,18 +352,17 @@ Be objective and constructive in your evaluation."""
                     conf_text = line.replace("**CONFIDENCE:**", "").strip()
                     try:
                         confidence = float(conf_text)
-                        confidence = max(0.0, min(1.0, confidence))  # Clamp to [0,1]
+                        confidence = max(0.0, min(1.0, confidence))  
                     except ValueError:
                         confidence = 0.5
                 
                 elif line.startswith("**REASONING:**"):
                     reasoning = line.replace("**REASONING:**", "").strip()
             
-            # Also try to extract reasoning from the rest of the response
             if not reasoning:
                 reasoning_start = response_content.find("**REASONING:**")
                 if reasoning_start != -1:
-                    reasoning = response_content[reasoning_start + len("**REASONING:")]:].strip()
+                    reasoning = response_content[reasoning_start + len("**REASONING:") :].strip()
             
             if vote_choice:
                 return AgentVote(

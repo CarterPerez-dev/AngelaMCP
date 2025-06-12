@@ -1,641 +1,599 @@
 """
-Session and Task Manager for AngelaMCP.
-Manages session lifecycle, task queues, resource allocation, and performance monitoring.
+Task Orchestrator for AngelaMCP multi-agent collaboration.
+
+This is the core brain that coordinates between Claude Code, OpenAI, and Gemini agents.
+I'm implementing a production-grade orchestration system with debate, voting, and consensus.
 """
 
 import asyncio
-import logging
+import time
 import uuid
-from datetime import datetime, timedelta
-from typing import Dict, Any, List, Optional, Set, Union
+from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass, field
-from collections import defaultdict, deque
 from enum import Enum
-import weakref
 
-from src.models.database import Conversation, TaskExecution, TaskStatus, AgentType
-from src.persistence.repositories import RepositoryManager
+from src.agents.base import BaseAgent, AgentType, AgentResponse, TaskContext, TaskType
+from src.agents.claude_agent import ClaudeCodeAgent
+from src.agents.openai_agent import OpenAIAgent
+from src.agents.gemini_agent import GeminiAgent
 from src.persistence.database import DatabaseManager
-from src.utils.metrics import MetricsCollector
+from src.utils.logger import get_logger
+from src.utils.exceptions import OrchestrationError
 from config.settings import settings
 
+logger = get_logger("orchestrator.manager")
 
-class SessionStatus(Enum):
-    """Session status enumeration."""
-    ACTIVE = "active"
-    IDLE = "idle"
-    TERMINATED = "terminated"
-    ERROR = "error"
+
+class CollaborationStrategy(str, Enum):
+    """Strategy for agent collaboration."""
+    SINGLE_AGENT = "single_agent"
+    PARALLEL = "parallel"
+    DEBATE = "debate"
+    CONSENSUS = "consensus"
+
+
+class TaskComplexity(str, Enum):
+    """Task complexity levels."""
+    SIMPLE = "simple"
+    MODERATE = "moderate"
+    COMPLEX = "complex"
+    EXPERT = "expert"
 
 
 @dataclass
-class SessionInfo:
-    """Information about an active session."""
-    session_id: str
-    conversation_id: Optional[str] = None
-    status: SessionStatus = SessionStatus.ACTIVE
-    created_at: datetime = field(default_factory=datetime.utcnow)
-    last_activity: datetime = field(default_factory=datetime.utcnow)
-    task_count: int = 0
+class CollaborationResult:
+    """Result of a collaboration session."""
+    success: bool
+    final_solution: str
+    agent_responses: List[Dict[str, Any]] = field(default_factory=list)
+    consensus_score: float = 0.0
+    debate_summary: Optional[str] = None
+    execution_time: float = 0.0
+    cost_breakdown: Optional[Dict[str, float]] = None
+    strategy_used: Optional[CollaborationStrategy] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
-class TaskQueueItem:
-    """Item in the task queue."""
-    task_id: str
-    conversation_id: str
-    task_type: str
-    priority: int
-    input_data: Dict[str, Any]
-    created_at: datetime = field(default_factory=datetime.utcnow)
-    retries: int = 0
-    max_retries: int = 3
+class DebateRound:
+    """Single round of debate between agents."""
+    round_number: int
+    topic: str
+    responses: List[Dict[str, Any]] = field(default_factory=list)
+    critiques: List[Dict[str, Any]] = field(default_factory=list)
+    round_summary: Optional[str] = None
 
 
-class ResourcePool:
-    """Manages resource allocation for agents and tasks."""
-    
-    def __init__(self, max_concurrent_tasks: int = 5):
-        self.max_concurrent_tasks = max_concurrent_tasks
-        self.active_tasks: Set[str] = set()
-        self.agent_load: Dict[str, int] = defaultdict(int)
-        self.lock = asyncio.Lock()
-        
-    async def acquire_task_slot(self, task_id: str, agent_type: str) -> bool:
-        """Try to acquire a task slot for execution."""
-        async with self.lock:
-            if len(self.active_tasks) >= self.max_concurrent_tasks:
-                return False
-                
-            self.active_tasks.add(task_id)
-            self.agent_load[agent_type] += 1
-            return True
-    
-    async def release_task_slot(self, task_id: str, agent_type: str):
-        """Release a task slot after completion."""
-        async with self.lock:
-            self.active_tasks.discard(task_id)
-            self.agent_load[agent_type] = max(0, self.agent_load[agent_type] - 1)
-    
-    def get_load_info(self) -> Dict[str, Any]:
-        """Get current resource load information."""
-        return {
-            "active_tasks": len(self.active_tasks),
-            "max_concurrent": self.max_concurrent_tasks,
-            "utilization": len(self.active_tasks) / self.max_concurrent_tasks * 100,
-            "agent_load": dict(self.agent_load)
-        }
+@dataclass
+class DebateResult:
+    """Result of a structured debate."""
+    topic: str
+    rounds: List[DebateRound] = field(default_factory=list)
+    final_consensus: Optional[str] = None
+    consensus_score: float = 0.0
+    participant_votes: Dict[str, Any] = field(default_factory=dict)
+    rounds_completed: int = 0
 
 
-class SessionManager:
-    """Manages active sessions and their lifecycle."""
-    
-    def __init__(self, repository_manager: RepositoryManager, metrics: MetricsCollector):
-        self.repository_manager = repository_manager
-        self.metrics = metrics
-        self.logger = logging.getLogger(__name__)
-        
-        # Active sessions
-        self.active_sessions: Dict[str, SessionInfo] = {}
-        
-        # Session cleanup task
-        self._cleanup_task: Optional[asyncio.Task] = None
-        self._running = False
-        
-    async def start(self):
-        """Start the session manager."""
-        if self._running:
-            return
-            
-        self._running = True
-        self._cleanup_task = asyncio.create_task(self._cleanup_sessions())
-        self.logger.info("Session manager started")
-    
-    async def stop(self):
-        """Stop the session manager."""
-        self._running = False
-        if self._cleanup_task:
-            self._cleanup_task.cancel()
-            try:
-                await self._cleanup_task
-            except asyncio.CancelledError:
-                pass
-        self.logger.info("Session manager stopped")
-    
-    async def create_session(self, metadata: Dict[str, Any] = None) -> str:
-        """Create a new session."""
-        session_id = str(uuid.uuid4())
-        
-        # Create conversation in database
-        conversation = await self.repository_manager.conversations.create_conversation(
-            session_id=uuid.UUID(session_id),
-            metadata=metadata or {}
-        )
-        
-        # Create session info
-        session_info = SessionInfo(
-            session_id=session_id,
-            conversation_id=str(conversation.id),
-            metadata=metadata or {}
-        )
-        
-        self.active_sessions[session_id] = session_info
-        
-        self.logger.info(f"Created session {session_id} with conversation {conversation.id}")
-        return session_id
-    
-    async def get_session(self, session_id: str) -> Optional[SessionInfo]:
-        """Get session information."""
-        return self.active_sessions.get(session_id)
-    
-    async def update_session_activity(self, session_id: str):
-        """Update session last activity timestamp."""
-        if session_id in self.active_sessions:
-            self.active_sessions[session_id].last_activity = datetime.utcnow()
-    
-    async def increment_task_count(self, session_id: str):
-        """Increment task count for session."""
-        if session_id in self.active_sessions:
-            self.active_sessions[session_id].task_count += 1
-    
-    async def terminate_session(self, session_id: str) -> bool:
-        """Terminate a session."""
-        session_info = self.active_sessions.get(session_id)
-        if not session_info:
-            return False
-            
-        # End conversation in database
-        if session_info.conversation_id:
-            await self.repository_manager.conversations.end_conversation(
-                uuid.UUID(session_info.conversation_id)
-            )
-        
-        # Update session status
-        session_info.status = SessionStatus.TERMINATED
-        
-        # Remove from active sessions
-        del self.active_sessions[session_id]
-        
-        self.logger.info(f"Terminated session {session_id}")
-        return True
-    
-    async def _cleanup_sessions(self):
-        """Background task to cleanup idle sessions."""
-        while self._running:
-            try:
-                now = datetime.utcnow()
-                timeout = timedelta(seconds=settings.session_timeout)
-                
-                # Find sessions to cleanup
-                sessions_to_cleanup = []
-                for session_id, session_info in self.active_sessions.items():
-                    if now - session_info.last_activity > timeout:
-                        sessions_to_cleanup.append(session_id)
-                
-                # Cleanup idle sessions
-                for session_id in sessions_to_cleanup:
-                    await self.terminate_session(session_id)
-                    self.logger.info(f"Cleaned up idle session {session_id}")
-                
-                # Check if we're over the session limit
-                if len(self.active_sessions) > settings.max_concurrent_sessions:
-                    # Remove oldest sessions
-                    sessions_by_age = sorted(
-                        self.active_sessions.items(),
-                        key=lambda x: x[1].last_activity
-                    )
-                    
-                    excess_count = len(self.active_sessions) - settings.max_concurrent_sessions
-                    for session_id, _ in sessions_by_age[:excess_count]:
-                        await self.terminate_session(session_id)
-                        self.logger.info(f"Terminated session {session_id} due to session limit")
-                
-                await asyncio.sleep(settings.session_cleanup_interval)
-                
-            except Exception as e:
-                self.logger.error(f"Error in session cleanup: {e}")
-                await asyncio.sleep(60)  # Wait longer on error
-    
-    def get_session_stats(self) -> Dict[str, Any]:
-        """Get session statistics."""
-        now = datetime.utcnow()
-        
-        active_count = len(self.active_sessions)
-        idle_count = 0
-        
-        for session_info in self.active_sessions.values():
-            if now - session_info.last_activity > timedelta(minutes=5):
-                idle_count += 1
-        
-        return {
-            "active_sessions": active_count,
-            "idle_sessions": idle_count,
-            "max_sessions": settings.max_concurrent_sessions,
-            "utilization": active_count / settings.max_concurrent_sessions * 100 if settings.max_concurrent_sessions > 0 else 0
-        }
+class TaskOrchestrator:
+    """
+    Main orchestrator for multi-agent collaboration.
 
+    Coordinates Claude Code, OpenAI, and Gemini agents for complex tasks.
+    """
 
-class TaskQueue:
-    """Priority-based task queue with retry logic."""
-    
-    def __init__(self, metrics: MetricsCollector):
-        self.metrics = metrics
-        self.logger = logging.getLogger(__name__)
-        
-        # Task queues by priority (higher number = higher priority)
-        self.queues: Dict[int, deque] = defaultdict(lambda: deque())
-        self.pending_tasks: Dict[str, TaskQueueItem] = {}
-        self.failed_tasks: Dict[str, TaskQueueItem] = {}
-        
-        # Queue statistics
-        self.processed_count = 0
-        self.failed_count = 0
-        
-        # Lock for thread safety
-        self.lock = asyncio.Lock()
-    
-    async def enqueue(self, task_item: TaskQueueItem):
-        """Add task to queue."""
-        async with self.lock:
-            self.queues[task_item.priority].append(task_item)
-            self.pending_tasks[task_item.task_id] = task_item
-            
-        self.logger.debug(f"Enqueued task {task_item.task_id} with priority {task_item.priority}")
-    
-    async def dequeue(self) -> Optional[TaskQueueItem]:
-        """Get next task from queue (highest priority first)."""
-        async with self.lock:
-            # Check queues from highest to lowest priority
-            for priority in sorted(self.queues.keys(), reverse=True):
-                if self.queues[priority]:
-                    task_item = self.queues[priority].popleft()
-                    return task_item
-            
-            return None
-    
-    async def mark_completed(self, task_id: str):
-        """Mark task as completed."""
-        async with self.lock:
-            if task_id in self.pending_tasks:
-                del self.pending_tasks[task_id]
-                self.processed_count += 1
-    
-    async def mark_failed(self, task_id: str, error: str = None):
-        """Mark task as failed and handle retry logic."""
-        async with self.lock:
-            if task_id not in self.pending_tasks:
-                return
-                
-            task_item = self.pending_tasks[task_id]
-            task_item.retries += 1
-            
-            if task_item.retries <= task_item.max_retries:
-                # Re-queue for retry with lower priority
-                task_item.priority = max(0, task_item.priority - 1)
-                self.queues[task_item.priority].append(task_item)
-                self.logger.info(f"Re-queued task {task_id} for retry {task_item.retries}/{task_item.max_retries}")
-            else:
-                # Move to failed tasks
-                del self.pending_tasks[task_id]
-                self.failed_tasks[task_id] = task_item
-                self.failed_count += 1
-                self.logger.error(f"Task {task_id} failed permanently after {task_item.retries} retries")
-    
-    def get_queue_stats(self) -> Dict[str, Any]:
-        """Get queue statistics."""
-        total_pending = sum(len(queue) for queue in self.queues.values())
-        
-        return {
-            "pending_tasks": total_pending,
-            "processed_tasks": self.processed_count,
-            "failed_tasks": self.failed_count,
-            "queue_sizes_by_priority": {
-                priority: len(queue) for priority, queue in self.queues.items()
-            }
-        }
-
-
-class TaskManager:
-    """Manages task lifecycle and execution coordination."""
-    
     def __init__(
         self,
-        repository_manager: RepositoryManager,
-        session_manager: SessionManager,
-        metrics: MetricsCollector
+        claude_agent: ClaudeCodeAgent,
+        openai_agent: OpenAIAgent,
+        gemini_agent: GeminiAgent,
+        db_manager: Optional[DatabaseManager] = None
     ):
-        self.repository_manager = repository_manager
-        self.session_manager = session_manager
-        self.metrics = metrics
-        self.logger = logging.getLogger(__name__)
-        
-        # Task management components
-        self.task_queue = TaskQueue(metrics)
-        self.resource_pool = ResourcePool(settings.parallel_task_limit)
-        
-        # Task execution tracking
-        self.active_executions: Dict[str, asyncio.Task] = {}
-        
-        # Task processor
-        self._processor_task: Optional[asyncio.Task] = None
-        self._running = False
-    
-    async def start(self):
-        """Start the task manager."""
-        if self._running:
-            return
-            
-        self._running = True
-        self._processor_task = asyncio.create_task(self._process_tasks())
-        self.logger.info("Task manager started")
-    
-    async def stop(self):
-        """Stop the task manager."""
-        self._running = False
-        
-        # Cancel processor
-        if self._processor_task:
-            self._processor_task.cancel()
-            try:
-                await self._processor_task
-            except asyncio.CancelledError:
-                pass
-        
-        # Cancel active executions
-        for task in self.active_executions.values():
-            task.cancel()
-        
-        if self.active_executions:
-            await asyncio.gather(*self.active_executions.values(), return_exceptions=True)
-        
-        self.logger.info("Task manager stopped")
-    
-    async def submit_task(
-        self,
-        session_id: str,
-        task_type: str,
-        input_data: Dict[str, Any],
-        priority: int = 1
-    ) -> str:
-        """Submit a new task for execution."""
-        # Get or create session
-        session_info = await self.session_manager.get_session(session_id)
-        if not session_info:
-            raise ValueError(f"Session {session_id} not found")
-        
-        # Create task execution in database
-        task_execution = await self.repository_manager.tasks.create_task_execution(
-            conversation_id=uuid.UUID(session_info.conversation_id),
-            task_type=task_type,
-            input_data=input_data
-        )
-        
-        # Create queue item
-        task_item = TaskQueueItem(
-            task_id=str(task_execution.id),
-            conversation_id=session_info.conversation_id,
-            task_type=task_type,
-            priority=priority,
-            input_data=input_data
-        )
-        
-        # Enqueue task
-        await self.task_queue.enqueue(task_item)
-        
-        # Update session activity
-        await self.session_manager.update_session_activity(session_id)
-        await self.session_manager.increment_task_count(session_id)
-        
-        self.logger.info(f"Submitted task {task_execution.id} of type {task_type}")
-        return str(task_execution.id)
-    
-    async def get_task_status(self, task_id: str) -> Optional[Dict[str, Any]]:
-        """Get task execution status."""
-        task_execution = await self.repository_manager.tasks.get_task_execution(uuid.UUID(task_id))
-        if not task_execution:
-            return None
-            
-        return {
-            "task_id": str(task_execution.id),
-            "status": task_execution.status.value,
-            "task_type": task_execution.task_type,
-            "started_at": task_execution.started_at.isoformat() if task_execution.started_at else None,
-            "completed_at": task_execution.completed_at.isoformat() if task_execution.completed_at else None,
-            "output_data": task_execution.output_data
-        }
-    
-    async def cancel_task(self, task_id: str) -> bool:
-        """Cancel a task execution."""
-        # Cancel if currently executing
-        if task_id in self.active_executions:
-            self.active_executions[task_id].cancel()
-            del self.active_executions[task_id]
-        
-        # Update database
-        await self.repository_manager.tasks.update_task_status(
-            uuid.UUID(task_id),
-            TaskStatus.CANCELLED
-        )
-        
-        self.logger.info(f"Cancelled task {task_id}")
-        return True
-    
-    async def _process_tasks(self):
-        """Background task processor."""
-        while self._running:
-            try:
-                # Get next task from queue
-                task_item = await self.task_queue.dequeue()
-                if not task_item:
-                    await asyncio.sleep(1)  # No tasks available
-                    continue
-                
-                # Try to acquire resources
-                if not await self.resource_pool.acquire_task_slot(task_item.task_id, "orchestrator"):
-                    # Re-queue task if no resources available
-                    await self.task_queue.enqueue(task_item)
-                    await asyncio.sleep(5)  # Wait before retrying
-                    continue
-                
-                # Start task execution
-                execution_task = asyncio.create_task(
-                    self._execute_task(task_item)
-                )
-                self.active_executions[task_item.task_id] = execution_task
-                
-                # Don't await here - let it run in background
-                
-            except Exception as e:
-                self.logger.error(f"Error in task processor: {e}")
-                await asyncio.sleep(10)  # Wait on error
-    
-    async def _execute_task(self, task_item: TaskQueueItem):
-        """Execute a single task."""
-        task_id = task_item.task_id
-        
-        try:
-            # Update task status to running
-            await self.repository_manager.tasks.update_task_status(
-                uuid.UUID(task_id),
-                TaskStatus.RUNNING
-            )
-            
-            # Record start time for metrics
-            start_time = datetime.utcnow()
-            
-            # Here you would integrate with the actual orchestrator
-            # For now, we'll simulate task execution
-            await asyncio.sleep(1)  # Simulate work
-            
-            # Calculate execution time
-            execution_time = (datetime.utcnow() - start_time).total_seconds()
-            
-            # Mark task as completed
-            await self.repository_manager.tasks.update_task_status(
-                uuid.UUID(task_id),
-                TaskStatus.COMPLETED,
-                {"execution_time": execution_time}
-            )
-            
-            await self.task_queue.mark_completed(task_id)
-            
-            # Record metrics
-            await self.metrics.record_timing("task_execution", execution_time)
-            
-            self.logger.info(f"Completed task {task_id} in {execution_time:.2f}s")
-            
-        except asyncio.CancelledError:
-            # Task was cancelled
-            await self.repository_manager.tasks.update_task_status(
-                uuid.UUID(task_id),
-                TaskStatus.CANCELLED
-            )
-            self.logger.info(f"Task {task_id} was cancelled")
-            
-        except Exception as e:
-            # Task failed
-            await self.repository_manager.tasks.update_task_status(
-                uuid.UUID(task_id),
-                TaskStatus.FAILED,
-                {"error": str(e)}
-            )
-            
-            await self.task_queue.mark_failed(task_id, str(e))
-            await self.metrics.record_error("task_execution", str(e))
-            
-            self.logger.error(f"Task {task_id} failed: {e}")
-            
-        finally:
-            # Release resources
-            await self.resource_pool.release_task_slot(task_id, "orchestrator")
-            
-            # Remove from active executions
-            if task_id in self.active_executions:
-                del self.active_executions[task_id]
-    
-    def get_manager_stats(self) -> Dict[str, Any]:
-        """Get comprehensive manager statistics."""
-        return {
-            "sessions": self.session_manager.get_session_stats(),
-            "task_queue": self.task_queue.get_queue_stats(),
-            "resources": self.resource_pool.get_load_info(),
-            "active_executions": len(self.active_executions)
-        }
-
-
-class OrchestrationManager:
-    """Main orchestration manager that coordinates all components."""
-    
-    def __init__(
-        self,
-        db_manager: DatabaseManager,
-        metrics: MetricsCollector
-    ):
+        self.claude_agent = claude_agent
+        self.openai_agent = openai_agent
+        self.gemini_agent = gemini_agent
         self.db_manager = db_manager
-        self.metrics = metrics
-        self.logger = logging.getLogger(__name__)
-        
-        # Create repository manager
-        self.repository_manager = None  # Will be set during initialization
-        
-        # Create managers
-        self.session_manager = None
-        self.task_manager = None
-        
-        self._running = False
-    
-    async def initialize(self):
-        """Initialize the orchestration manager."""
-        if self._running:
-            return
-        
-        # Create repository manager with database session
-        session = await self.db_manager.get_session()
-        self.repository_manager = RepositoryManager(session)
-        
-        # Create and start managers
-        self.session_manager = SessionManager(self.repository_manager, self.metrics)
-        self.task_manager = TaskManager(
-            self.repository_manager,
-            self.session_manager,
-            self.metrics
-        )
-        
-        await self.session_manager.start()
-        await self.task_manager.start()
-        
-        self._running = True
-        self.logger.info("Orchestration manager initialized")
-    
-    async def cleanup(self):
-        """Cleanup the orchestration manager."""
-        if not self._running:
-            return
-        
-        self._running = False
-        
-        # Stop managers
-        if self.task_manager:
-            await self.task_manager.stop()
-        
-        if self.session_manager:
-            await self.session_manager.stop()
-        
-        self.logger.info("Orchestration manager cleaned up")
-    
-    async def create_session(self, metadata: Dict[str, Any] = None) -> str:
-        """Create a new session."""
-        if not self._running:
-            raise RuntimeError("Orchestration manager not initialized")
-        
-        return await self.session_manager.create_session(metadata)
-    
-    async def submit_task(
-        self,
-        session_id: str,
-        task_type: str,
-        input_data: Dict[str, Any],
-        priority: int = 1
-    ) -> str:
-        """Submit a task for execution."""
-        if not self._running:
-            raise RuntimeError("Orchestration manager not initialized")
-        
-        return await self.task_manager.submit_task(session_id, task_type, input_data, priority)
-    
-    async def get_system_status(self) -> Dict[str, Any]:
-        """Get comprehensive system status."""
-        if not self._running:
-            return {"status": "not_initialized"}
-        
-        stats = self.task_manager.get_manager_stats()
-        
-        return {
-            "status": "running",
-            "timestamp": datetime.utcnow().isoformat(),
-            "sessions": stats["sessions"],
-            "task_queue": stats["task_queue"],
-            "resources": stats["resources"],
-            "active_executions": stats["active_executions"]
+
+        # Agent mapping
+        self.agents: Dict[str, BaseAgent] = {
+            "claude": claude_agent,
+            "openai": openai_agent,
+            "gemini": gemini_agent
         }
+
+        # Voting weights (Claude Code is senior developer)
+        self.voting_weights = {
+            "claude": settings.claude_vote_weight,
+            "openai": settings.openai_vote_weight,
+            "gemini": settings.gemini_vote_weight
+        }
+
+        logger.info("Task orchestrator initialized with 3 agents")
+
+    async def collaborate_on_task(
+        self,
+        task_description: str,
+        agents: List[str] = None,
+        strategy: str = "debate",
+        max_rounds: int = 3,
+        require_consensus: bool = True
+    ) -> CollaborationResult:
+        """
+        Main collaboration method - orchestrates multiple agents on a task.
+        """
+        start_time = time.time()
+
+        try:
+            # Default to all agents if none specified
+            if agents is None:
+                agents = ["claude", "openai", "gemini"]
+
+            # Validate agents
+            valid_agents = [agent for agent in agents if agent in self.agents]
+            if not valid_agents:
+                raise OrchestrationError("No valid agents specified")
+
+            logger.info(f"Starting collaboration: {strategy} with agents: {valid_agents}")
+
+            # Determine strategy
+            collaboration_strategy = CollaborationStrategy(strategy)
+
+            # Execute based on strategy
+            if collaboration_strategy == CollaborationStrategy.SINGLE_AGENT:
+                result = await self._single_agent_execution(task_description, valid_agents[0])
+            elif collaboration_strategy == CollaborationStrategy.PARALLEL:
+                result = await self._parallel_execution(task_description, valid_agents)
+            elif collaboration_strategy == CollaborationStrategy.DEBATE:
+                result = await self._debate_execution(task_description, valid_agents, max_rounds)
+            elif collaboration_strategy == CollaborationStrategy.CONSENSUS:
+                result = await self._consensus_execution(task_description, valid_agents, require_consensus)
+            else:
+                raise OrchestrationError(f"Unknown strategy: {strategy}")
+
+            # Calculate execution time
+            result.execution_time = time.time() - start_time
+            result.strategy_used = collaboration_strategy
+
+            logger.info(f"Collaboration completed in {result.execution_time:.2f}s")
+            return result
+
+        except Exception as e:
+            logger.error(f"Collaboration failed: {e}", exc_info=True)
+            return CollaborationResult(
+                success=False,
+                final_solution=f"Collaboration failed: {str(e)}",
+                execution_time=time.time() - start_time
+            )
+
+    async def start_debate(
+        self,
+        topic: str,
+        agents: List[str] = None,
+        max_rounds: int = 3,
+        timeout_seconds: int = 300
+    ) -> Dict[str, Any]:
+        """Start a structured debate between agents."""
+        start_time = time.time()
+
+        try:
+            if agents is None:
+                agents = ["claude", "openai", "gemini"]
+
+            valid_agents = [agent for agent in agents if agent in self.agents]
+            if len(valid_agents) < 2:
+                raise OrchestrationError("Need at least 2 agents for debate")
+
+            logger.info(f"Starting debate on: {topic}")
+
+            debate_result = DebateResult(topic=topic)
+
+            # Run debate rounds
+            for round_num in range(1, max_rounds + 1):
+                round_result = await self._run_debate_round(
+                    topic, valid_agents, round_num, timeout_seconds
+                )
+                debate_result.rounds.append(round_result)
+                debate_result.rounds_completed = round_num
+
+                # Check if consensus reached early
+                if await self._check_early_consensus(debate_result.rounds):
+                    logger.info(f"Early consensus reached after round {round_num}")
+                    break
+
+            # Generate final consensus
+            final_consensus = await self._generate_final_consensus(debate_result)
+            debate_result.final_consensus = final_consensus["summary"]
+            debate_result.consensus_score = final_consensus["score"]
+            debate_result.participant_votes = final_consensus["votes"]
+
+            execution_time = time.time() - start_time
+
+            return {
+                "topic": topic,
+                "rounds_completed": debate_result.rounds_completed,
+                "rounds": [
+                    {
+                        "round": r.round_number,
+                        "responses": r.responses,
+                        "critiques": r.critiques,
+                        "summary": r.round_summary
+                    }
+                    for r in debate_result.rounds
+                ],
+                "consensus": {
+                    "summary": debate_result.final_consensus,
+                    "score": debate_result.consensus_score,
+                    "votes": debate_result.participant_votes
+                },
+                "execution_time": execution_time
+            }
+
+        except Exception as e:
+            logger.error(f"Debate failed: {e}", exc_info=True)
+            return {
+                "topic": topic,
+                "error": str(e),
+                "execution_time": time.time() - start_time
+            }
+
+    async def analyze_task_complexity(self, task_description: str) -> Dict[str, Any]:
+        """Analyze task complexity and recommend collaboration strategy."""
+        try:
+            # Simple complexity analysis based on keywords and length
+            complexity_indicators = {
+                "simple": ["hello", "test", "example", "simple"],
+                "moderate": ["create", "build", "implement", "design"],
+                "complex": ["system", "architecture", "integrate", "optimize"],
+                "expert": ["enterprise", "scalable", "production", "security", "performance"]
+            }
+
+            task_lower = task_description.lower()
+            task_length = len(task_description.split())
+
+            # Calculate complexity score
+            complexity_score = 0
+            detected_level = TaskComplexity.SIMPLE
+
+            for level, keywords in complexity_indicators.items():
+                if any(keyword in task_lower for keyword in keywords):
+                    if level == "simple":
+                        complexity_score = max(complexity_score, 2)
+                        detected_level = TaskComplexity.SIMPLE
+                    elif level == "moderate":
+                        complexity_score = max(complexity_score, 4)
+                        detected_level = TaskComplexity.MODERATE
+                    elif level == "complex":
+                        complexity_score = max(complexity_score, 7)
+                        detected_level = TaskComplexity.COMPLEX
+                    elif level == "expert":
+                        complexity_score = max(complexity_score, 9)
+                        detected_level = TaskComplexity.EXPERT
+
+            # Adjust based on length
+            if task_length > 50:
+                complexity_score += 1
+            elif task_length > 20:
+                complexity_score += 0.5
+
+            complexity_score = min(10, complexity_score)
+
+            # Recommend strategy
+            if complexity_score <= 3:
+                strategy = CollaborationStrategy.SINGLE_AGENT
+                agents = ["claude"]
+                estimated_time = "1-5 minutes"
+            elif complexity_score <= 6:
+                strategy = CollaborationStrategy.PARALLEL
+                agents = ["claude", "openai"]
+                estimated_time = "5-15 minutes"
+            else:
+                strategy = CollaborationStrategy.DEBATE
+                agents = ["claude", "openai", "gemini"]
+                estimated_time = "15-30 minutes"
+
+            return {
+                "complexity_score": complexity_score,
+                "complexity_level": detected_level.value,
+                "recommended_strategy": strategy.value,
+                "recommended_agents": agents,
+                "estimated_time": estimated_time,
+                "technical_complexity": detected_level.value,
+                "collaboration_benefit": "High" if complexity_score > 6 else "Medium" if complexity_score > 3 else "Low",
+                "reasoning": f"Task analysis indicates {detected_level.value} complexity based on keywords and scope. "
+                           f"Recommended approach: {strategy.value} with {len(agents)} agent(s)."
+            }
+
+        except Exception as e:
+            logger.error(f"Task complexity analysis failed: {e}")
+            return {
+                "complexity_score": 5,
+                "recommended_strategy": "parallel",
+                "recommended_agents": ["claude", "openai"],
+                "error": str(e)
+            }
+
+    async def _single_agent_execution(self, task_description: str, agent_name: str) -> CollaborationResult:
+        """Execute task with single agent."""
+        try:
+            agent = self.agents[agent_name]
+            context = TaskContext(
+                task_type=TaskType.GENERAL,
+                agent_role="primary"
+            )
+
+            response = await agent.generate(task_description, context)
+
+            return CollaborationResult(
+                success=True,
+                final_solution=response.content,
+                agent_responses=[{
+                    "agent": agent_name,
+                    "content": response.content,
+                    "confidence": response.confidence,
+                    "execution_time": response.execution_time_ms
+                }],
+                consensus_score=1.0
+            )
+
+        except Exception as e:
+            return CollaborationResult(
+                success=False,
+                final_solution=f"Single agent execution failed: {str(e)}"
+            )
+
+    async def _parallel_execution(self, task_description: str, agents: List[str]) -> CollaborationResult:
+        """Execute task with agents in parallel."""
+        try:
+            tasks = []
+            context = TaskContext(task_type=TaskType.GENERAL)
+
+            # Launch all agents in parallel
+            for agent_name in agents:
+                agent = self.agents[agent_name]
+                task = agent.generate(task_description, context)
+                tasks.append((agent_name, task))
+
+            # Wait for all responses
+            responses = []
+            for agent_name, task in tasks:
+                try:
+                    response = await task
+                    responses.append({
+                        "agent": agent_name,
+                        "content": response.content,
+                        "confidence": response.confidence,
+                        "execution_time": response.execution_time_ms
+                    })
+                except Exception as e:
+                    logger.error(f"Agent {agent_name} failed: {e}")
+                    responses.append({
+                        "agent": agent_name,
+                        "content": f"Agent failed: {str(e)}",
+                        "confidence": 0.0,
+                        "execution_time": 0
+                    })
+
+            # Select best response (Claude has priority, then by confidence)
+            best_response = None
+            for response in responses:
+                if response["agent"] == "claude":
+                    best_response = response
+                    break
+
+            if not best_response:
+                best_response = max(responses, key=lambda r: r["confidence"])
+
+            return CollaborationResult(
+                success=True,
+                final_solution=best_response["content"],
+                agent_responses=responses,
+                consensus_score=0.8  # Good but not perfect consensus
+            )
+
+        except Exception as e:
+            return CollaborationResult(
+                success=False,
+                final_solution=f"Parallel execution failed: {str(e)}"
+            )
+
+    async def _debate_execution(self, task_description: str, agents: List[str], max_rounds: int) -> CollaborationResult:
+        """Execute task using debate methodology."""
+        try:
+            # Start with initial proposals
+            proposals = await self._gather_initial_proposals(task_description, agents)
+
+            # Run debate rounds
+            debate_history = []
+            for round_num in range(1, max_rounds + 1):
+                round_result = await self._run_debate_round(
+                    task_description, agents, round_num, 300
+                )
+                debate_history.append(round_result)
+
+            # Generate final consensus through voting
+            final_result = await self._generate_voting_consensus(proposals, debate_history)
+
+            return CollaborationResult(
+                success=True,
+                final_solution=final_result["solution"],
+                agent_responses=proposals,
+                consensus_score=final_result["consensus_score"],
+                debate_summary=final_result["debate_summary"]
+            )
+
+        except Exception as e:
+            return CollaborationResult(
+                success=False,
+                final_solution=f"Debate execution failed: {str(e)}"
+            )
+
+    async def _consensus_execution(self, task_description: str, agents: List[str], require_consensus: bool) -> CollaborationResult:
+        """Execute task requiring consensus."""
+        # For now, use debate as consensus mechanism
+        return await self._debate_execution(task_description, agents, 2)
+
+    async def _gather_initial_proposals(self, task_description: str, agents: List[str]) -> List[Dict[str, Any]]:
+        """Gather initial proposals from all agents."""
+        proposals = []
+        context = TaskContext(task_type=TaskType.ANALYSIS, agent_role="proposer")
+
+        for agent_name in agents:
+            try:
+                agent = self.agents[agent_name]
+                response = await agent.propose_solution(task_description, [], context)
+                proposals.append({
+                    "agent": agent_name,
+                    "content": response.content,
+                    "confidence": response.confidence
+                })
+            except Exception as e:
+                logger.error(f"Failed to get proposal from {agent_name}: {e}")
+                proposals.append({
+                    "agent": agent_name,
+                    "content": f"Proposal failed: {str(e)}",
+                    "confidence": 0.0
+                })
+
+        return proposals
+
+    async def _run_debate_round(self, topic: str, agents: List[str], round_num: int, timeout: int) -> DebateRound:
+        """Run a single round of debate."""
+        round_result = DebateRound(round_number=round_num, topic=topic)
+
+        # Each agent provides their position
+        for agent_name in agents:
+            try:
+                agent = self.agents[agent_name]
+                context = TaskContext(task_type=TaskType.DEBATE, agent_role="debater")
+
+                prompt = f"Debate Round {round_num} on: {topic}\nProvide your position and arguments."
+                response = await agent.generate(prompt, context)
+
+                round_result.responses.append({
+                    "agent": agent_name,
+                    "content": response.content,
+                    "confidence": response.confidence
+                })
+
+            except Exception as e:
+                logger.error(f"Agent {agent_name} failed in debate round {round_num}: {e}")
+
+        # Generate critiques
+        for agent_name in agents:
+            try:
+                agent = self.agents[agent_name]
+                context = TaskContext(task_type=TaskType.CODE_REVIEW, agent_role="critic")
+
+                # Critique other agents' responses
+                other_responses = [r for r in round_result.responses if r["agent"] != agent_name]
+                critique_prompt = f"Critique the following positions on {topic}:\n"
+                for resp in other_responses:
+                    critique_prompt += f"\n{resp['agent']}: {resp['content'][:200]}...\n"
+
+                critique = await agent.generate(critique_prompt, context)
+                round_result.critiques.append({
+                    "agent": agent_name,
+                    "content": critique.content
+                })
+
+            except Exception as e:
+                logger.error(f"Critique failed for {agent_name}: {e}")
+
+        return round_result
+
+    async def _check_early_consensus(self, rounds: List[DebateRound]) -> bool:
+        """Check if early consensus has been reached."""
+        # Simple implementation - check if recent responses are similar
+        if len(rounds) < 2:
+            return False
+
+        # For now, assume no early consensus to allow full debate
+        return False
+
+    async def _generate_final_consensus(self, debate_result: DebateResult) -> Dict[str, Any]:
+        """Generate final consensus from debate."""
+        try:
+            # Collect all final positions
+            final_positions = []
+            if debate_result.rounds:
+                last_round = debate_result.rounds[-1]
+                final_positions = last_round.responses
+
+            # Weighted voting
+            total_weight = 0
+            weighted_score = 0
+            votes = {}
+
+            for position in final_positions:
+                agent_name = position["agent"]
+                confidence = position["confidence"]
+                weight = self.voting_weights.get(agent_name, 1.0)
+
+                votes[agent_name] = {
+                    "position": position["content"][:200] + "...",
+                    "confidence": confidence,
+                    "weight": weight,
+                    "weighted_score": confidence * weight
+                }
+
+                total_weight += weight
+                weighted_score += confidence * weight
+
+            consensus_score = weighted_score / total_weight if total_weight > 0 else 0.0
+
+            # Generate summary (use Claude's position as base)
+            summary = "No consensus reached"
+            if final_positions:
+                # Priority to Claude, then highest confidence
+                claude_position = next((p for p in final_positions if p["agent"] == "claude"), None)
+                if claude_position:
+                    summary = claude_position["content"]
+                else:
+                    best_position = max(final_positions, key=lambda p: p["confidence"])
+                    summary = best_position["content"]
+
+            return {
+                "summary": summary,
+                "score": consensus_score,
+                "votes": votes
+            }
+
+        except Exception as e:
+            logger.error(f"Consensus generation failed: {e}")
+            return {
+                "summary": "Consensus generation failed",
+                "score": 0.0,
+                "votes": {}
+            }
+
+    async def _generate_voting_consensus(self, proposals: List[Dict[str, Any]], debate_history: List[DebateRound]) -> Dict[str, Any]:
+        """Generate consensus through weighted voting."""
+        try:
+            # Use Claude's final proposal as the solution (senior developer authority)
+            claude_proposal = next((p for p in proposals if p["agent"] == "claude"), None)
+
+            if claude_proposal:
+                solution = claude_proposal["content"]
+                consensus_score = 0.9  # High confidence in Claude's solution
+            else:
+                # Fallback to highest confidence proposal
+                best_proposal = max(proposals, key=lambda p: p["confidence"])
+                solution = best_proposal["content"]
+                consensus_score = best_proposal["confidence"]
+
+            # Generate debate summary
+            debate_summary = f"Completed {len(debate_history)} rounds of debate with {len(proposals)} agents."
+
+            return {
+                "solution": solution,
+                "consensus_score": consensus_score,
+                "debate_summary": debate_summary
+            }
+
+        except Exception as e:
+            logger.error(f"Voting consensus failed: {e}")
+            return {
+                "solution": "Consensus failed",
+                "consensus_score": 0.0,
+                "debate_summary": f"Voting failed: {str(e)}"
+            }

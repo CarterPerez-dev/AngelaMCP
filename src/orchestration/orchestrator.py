@@ -494,20 +494,20 @@ class TaskOrchestrator:
         """Persist task execution results to database."""
         try:
             async with self.db.get_session() as session:
-                # Create task execution record
                 task_execution = TaskExecution(
                     id=str(uuid.uuid4()),
                     conversation_id=task.conversation_id,
                     task_type=task.task_type.value,
-                    task_description=task.description[:1000],  # Truncate for storage
-                    orchestration_strategy=task.strategy.value,
-                    agents_used=[resp.agent_type for resp in result.agent_responses],
+                    task_description=task.description[:1000],
+                    strategy_used=task.strategy.value,
+                    participants=[resp.agent_type.value for resp in result.agent_responses],
                     success=result.success,
+                    final_solution=result.content[:5000],  
+                    consensus_score=result.metadata.get("consensus_score"),
                     execution_time_ms=result.execution_time_ms,
+                    total_tokens=result.total_tokens,
                     total_cost_usd=result.total_cost_usd,
-                    total_tokens_used=result.total_tokens,
-                    result_content=result.content[:5000],  # Truncate for storage
-                    error_message=result.error_message,
+                    error_info={"message": result.error_message} if result.error_message else None,
                     metadata_json=result.metadata
                 )
                 
