@@ -18,7 +18,7 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # Configuration
-REPO_URL="https://github.com/YOUR_USERNAME/AngelaMCP.git"  # Update this
+REPO_URL="https://github.com/CarterPerez/AngelaMCP.git"  # Update this
 INSTALL_DIR="$HOME/AngelaMCP"
 
 echo -e "${CYAN}🚀 AngelaMCP Global Installer${NC}"
