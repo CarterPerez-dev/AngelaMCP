@@ -198,11 +198,6 @@ class Settings(BaseSettings):
     enable_input_validation: bool = Field(default=True, env="ENABLE_INPUT_VALIDATION")
     enable_output_sanitization: bool = Field(default=True, env="ENABLE_OUTPUT_SANITIZATION")
     max_input_length: int = Field(default=100000, env="MAX_INPUT_LENGTH")
-    blocked_commands: List[str] = Field(
-        default=["format", "del", "rm", "sudo", "su"],
-        env="BLOCKED_COMMANDS",
-        json_schema_mode="python"
-    )
     sandbox_mode: bool = Field(default=False, env="SANDBOX_MODE")
     
     # ============================================
@@ -270,13 +265,6 @@ class Settings(BaseSettings):
             
         return expanded_path 
 
-    @field_validator("blocked_commands")
-    @classmethod
-    def parse_blocked_commands(cls, v: Any) -> List[str]:
-        """Parse blocked commands from string or list."""
-        if isinstance(v, str):
-            return [cmd.strip() for cmd in v.split(",")]
-        return v
 
     @property
     def is_production(self) -> bool:
