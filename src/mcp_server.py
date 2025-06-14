@@ -102,7 +102,7 @@ class AngelaMCPServer:
         except Exception as e:
             logger.error(f"Failed to initialize MCP server: {e}", exc_info=True)
             raise
-    
+
     def setup_tools(self) -> None:
         """Setup MCP tools that Claude Code can call."""
         
@@ -182,40 +182,60 @@ class AngelaMCPServer:
                 }
             ]
         
+        # Define tool handlers as separate methods to avoid nested function issues
         @self.server.call_tool()
         async def collaborate(arguments: Dict[str, Any]) -> CallToolResult:
             """Orchestrate collaboration between multiple AI agents."""
-            try:
-                # Parse request
-                request = CollaborationRequest(**arguments)
-                logger.info(f"Collaboration request: {request.task_description[:100]}...")
-                
-                # Create context
-                context = TaskContext(
-                    task_type=TaskType.GENERAL,
-                    session_id=f"mcp_{asyncio.current_task().get_name() if asyncio.current_task() else 'unknown'}"
-                )
-                
-                # Map strategy string to enum
-                strategy_map = {
-                    "debate": CollaborationStrategy.DEBATE,
-                    "parallel": CollaborationStrategy.PARALLEL,
-                    "consensus": CollaborationStrategy.CONSENSUS,
-                    "single_agent": CollaborationStrategy.SINGLE_AGENT,
-                    "auto": CollaborationStrategy.AUTO
-                }
-                
-                strategy = strategy_map.get(request.strategy, CollaborationStrategy.AUTO)
-                
-                # Execute collaboration
-                result = await self.orchestrator.execute_task(
-                    request.task_description,
-                    context,
-                    strategy
-                )
-                
-                # Format response
-                response_text = f"""**AngelaMCP Collaboration Result**
+            return await self._handle_collaborate(arguments)
+        
+        @self.server.call_tool()
+        async def debate(arguments: Dict[str, Any]) -> CallToolResult:
+            """Start a structured debate between AI agents."""
+            return await self._handle_debate(arguments)
+        
+        @self.server.call_tool()
+        async def analyze_task_complexity(arguments: Dict[str, Any]) -> CallToolResult:
+            """Analyze task complexity and recommend collaboration strategy."""
+            return await self._handle_analyze_task_complexity(arguments)
+        
+        @self.server.call_tool()
+        async def get_agent_status(arguments: Dict[str, Any]) -> CallToolResult:
+            """Get current status of all AI agents."""
+            return await self._handle_get_agent_status(arguments)
+
+    async def _handle_collaborate(self, arguments: Dict[str, Any]) -> CallToolResult:
+        """Handle collaboration requests."""
+        try:
+            # Parse request
+            request = CollaborationRequest(**arguments)
+            logger.info(f"Collaboration request: {request.task_description[:100]}...")
+            
+            # Create context
+            context = TaskContext(
+                task_type=TaskType.GENERAL,
+                session_id=f"mcp_{asyncio.current_task().get_name() if asyncio.current_task() else 'unknown'}"
+            )
+            
+            # Map strategy string to enum
+            strategy_map = {
+                "debate": CollaborationStrategy.DEBATE,
+                "parallel": CollaborationStrategy.PARALLEL,
+                "consensus": CollaborationStrategy.CONSENSUS,
+                "single_agent": CollaborationStrategy.SINGLE_AGENT,
+                "auto": CollaborationStrategy.AUTO
+            }
+            
+            strategy = strategy_map.get(request.strategy, CollaborationStrategy.AUTO)
+            
+            # Execute collaboration
+            result = await self.orchestrator.execute_task(
+                request.task_description,
+                context,
+                strategy
+            )
+            
+            # Format response
+            response_text = f"""**AngelaMCP Collaboration Result**
 
 **Strategy Used:** {result.strategy_used.value if result.strategy_used else 'unknown'}
 **Success:** {result.success}
@@ -225,47 +245,46 @@ class AngelaMCPServer:
 **Final Solution:**
 {result.final_solution}
 """
-                
-                if result.cost_breakdown:
-                    cost_text = "**Cost Breakdown:**\n"
-                    for agent, cost in result.cost_breakdown.items():
-                        cost_text += f"- {agent}: ${cost:.4f}\n"
-                    response_text += f"\n{cost_text}"
-                
-                if result.debate_summary:
-                    response_text += f"\n**Debate Summary:**\n{result.debate_summary}"
-                
-                return CallToolResult(
-                    content=[TextContent(type="text", text=response_text)]
-                )
-                
-            except Exception as e:
-                logger.error(f"Collaboration failed: {e}")
-                return CallToolResult(
-                    content=[TextContent(type="text", text=f"❌ Collaboration failed: {str(e)}")],
-                    isError=True
-                )
-        
-        @self.server.call_tool()
-        async def debate(arguments: Dict[str, Any]) -> CallToolResult:
-            """Start a structured debate between AI agents."""
-            try:
-                # Parse request
-                request = DebateRequest(**arguments)
-                logger.info(f"Debate request: {request.topic[:100]}...")
-                
-                # Create context
-                context = TaskContext(
-                    task_type=TaskType.DEBATE,
-                    session_id=f"mcp_debate_{id(request)}"
-                )
-                
-                # Start debate
-                result = await self.orchestrator.start_debate(request.topic, context)
-                
-                # Format response
-                if result.success:
-                    response_text = f"""**AngelaMCP Debate Result**
+            
+            if result.cost_breakdown:
+                cost_text = "**Cost Breakdown:**\n"
+                for agent, cost in result.cost_breakdown.items():
+                    cost_text += f"- {agent}: ${cost:.4f}\n"
+                response_text += f"\n{cost_text}"
+            
+            if result.debate_summary:
+                response_text += f"\n**Debate Summary:**\n{result.debate_summary}"
+            
+            return CallToolResult(
+                content=[TextContent(type="text", text=response_text)]
+            )
+            
+        except Exception as e:
+            logger.error(f"Collaboration failed: {e}")
+            return CallToolResult(
+                content=[TextContent(type="text", text=f"❌ Collaboration failed: {str(e)}")],
+                isError=True
+            )
+
+    async def _handle_debate(self, arguments: Dict[str, Any]) -> CallToolResult:
+        """Handle debate requests."""
+        try:
+            # Parse request
+            request = DebateRequest(**arguments)
+            logger.info(f"Debate request: {request.topic[:100]}...")
+            
+            # Create context
+            context = TaskContext(
+                task_type=TaskType.DEBATE,
+                session_id=f"mcp_debate_{id(request)}"
+            )
+            
+            # Start debate
+            result = await self.orchestrator.start_debate(request.topic, context)
+            
+            # Format response
+            if result.success:
+                response_text = f"""**AngelaMCP Debate Result**
 
 **Topic:** {request.topic}
 **Rounds Completed:** {result.rounds_completed}
@@ -277,69 +296,68 @@ class AngelaMCPServer:
 **Debate Summary:**
 {result.summary or 'No summary available'}
 """
-                    
-                    if result.participant_votes:
-                        vote_text = "**Final Votes:**\n"
-                        for agent, vote_info in result.participant_votes.items():
-                            vote_text += f"- {agent}: {vote_info}\n"
-                        response_text += f"\n{vote_text}"
-                else:
-                    response_text = f"❌ Debate failed: {result.error_message or 'Unknown error'}"
                 
-                return CallToolResult(
-                    content=[TextContent(type="text", text=response_text)]
-                )
+                if result.participant_votes:
+                    vote_text = "**Final Votes:**\n"
+                    for agent, vote_info in result.participant_votes.items():
+                        vote_text += f"- {agent}: {vote_info}\n"
+                    response_text += f"\n{vote_text}"
+            else:
+                response_text = f"❌ Debate failed: {result.error_message or 'Unknown error'}"
+            
+            return CallToolResult(
+                content=[TextContent(type="text", text=response_text)]
+            )
+            
+        except Exception as e:
+            logger.error(f"Debate failed: {e}")
+            return CallToolResult(
+                content=[TextContent(type="text", text=f"❌ Debate failed: {str(e)}")],
+                isError=True
+            )
+
+    async def _handle_analyze_task_complexity(self, arguments: Dict[str, Any]) -> CallToolResult:
+        """Handle task complexity analysis requests."""
+        try:
+            # Parse request
+            request = TaskAnalysisRequest(**arguments)
+            logger.info(f"Task analysis request: {request.task_description[:100]}...")
+            
+            # Create context for analysis
+            context = TaskContext(task_type=TaskType.ANALYSIS)
+            
+            # Use orchestrator's strategy selection logic
+            strategy = await self.orchestrator._select_strategy(
+                request.task_description, 
+                context
+            )
+            
+            # Provide detailed analysis
+            task_lower = request.task_description.lower()
+            
+            # Analyze complexity indicators
+            complexity_indicators = []
+            if any(word in task_lower for word in ["complex", "architecture", "system", "enterprise"]):
+                complexity_indicators.append("High complexity keywords detected")
+            
+            if len(request.task_description.split()) > 50:
+                complexity_indicators.append("Detailed/lengthy task description")
+            
+            if any(word in task_lower for word in ["compare", "analyze", "evaluate", "debate"]):
+                complexity_indicators.append("Requires multiple perspectives")
+            
+            # Agent capability analysis
+            agent_recommendations = []
+            if any(word in task_lower for word in ["code", "implement", "build", "create"]):
+                agent_recommendations.append("Claude Code - Primary implementation")
                 
-            except Exception as e:
-                logger.error(f"Debate failed: {e}")
-                return CallToolResult(
-                    content=[TextContent(type="text", text=f"❌ Debate failed: {str(e)}")],
-                    isError=True
-                )
-        
-        @self.server.call_tool()
-        async def analyze_task_complexity(arguments: Dict[str, Any]) -> CallToolResult:
-            """Analyze task complexity and recommend collaboration strategy."""
-            try:
-                # Parse request
-                request = TaskAnalysisRequest(**arguments)
-                logger.info(f"Task analysis request: {request.task_description[:100]}...")
+            if any(word in task_lower for word in ["review", "optimize", "improve", "fix"]):
+                agent_recommendations.append("OpenAI - Code review and optimization")
                 
-                # Create context for analysis
-                context = TaskContext(task_type=TaskType.ANALYSIS)
-                
-                # Use orchestrator's strategy selection logic
-                strategy = await self.orchestrator._select_strategy(
-                    request.task_description, 
-                    context
-                )
-                
-                # Provide detailed analysis
-                task_lower = request.task_description.lower()
-                
-                # Analyze complexity indicators
-                complexity_indicators = []
-                if any(word in task_lower for word in ["complex", "architecture", "system", "enterprise"]):
-                    complexity_indicators.append("High complexity keywords detected")
-                
-                if len(request.task_description.split()) > 50:
-                    complexity_indicators.append("Detailed/lengthy task description")
-                
-                if any(word in task_lower for word in ["compare", "analyze", "evaluate", "debate"]):
-                    complexity_indicators.append("Requires multiple perspectives")
-                
-                # Agent capability analysis
-                agent_recommendations = []
-                if any(word in task_lower for word in ["code", "implement", "build", "create"]):
-                    agent_recommendations.append("Claude Code - Primary implementation")
-                    
-                if any(word in task_lower for word in ["review", "optimize", "improve", "fix"]):
-                    agent_recommendations.append("OpenAI - Code review and optimization")
-                    
-                if any(word in task_lower for word in ["research", "best practices", "documentation"]):
-                    agent_recommendations.append("Gemini - Research and documentation")
-                
-                response_text = f"""**AngelaMCP Task Analysis**
+            if any(word in task_lower for word in ["research", "best practices", "documentation"]):
+                agent_recommendations.append("Gemini - Research and documentation")
+            
+            response_text = f"""**AngelaMCP Task Analysis**
 
 **Task:** {request.task_description}
 
@@ -353,71 +371,70 @@ class AngelaMCPServer:
 
 **Strategy Explanation:**
 """
-                
-                # Add strategy explanation
-                if strategy == CollaborationStrategy.SINGLE_AGENT:
-                    response_text += "This task appears straightforward and can be handled efficiently by a single agent (usually Claude Code)."
-                elif strategy == CollaborationStrategy.DEBATE:
-                    response_text += "This task benefits from multiple perspectives and structured debate between agents to reach the best solution."
-                elif strategy == CollaborationStrategy.CONSENSUS:
-                    response_text += "This task requires agreement from multiple agents to ensure quality and completeness."
-                elif strategy == CollaborationStrategy.PARALLEL:
-                    response_text += "This task can be broken down and executed in parallel by multiple agents for faster completion."
-                
-                return CallToolResult(
-                    content=[TextContent(type="text", text=response_text)]
-                )
-                
-            except Exception as e:
-                logger.error(f"Task analysis failed: {e}")
-                return CallToolResult(
-                    content=[TextContent(type="text", text=f"❌ Task analysis failed: {str(e)}")],
-                    isError=True
-                )
-        
-        @self.server.call_tool()
-        async def get_agent_status(arguments: Dict[str, Any]) -> CallToolResult:
-            """Get current status of all AI agents."""
-            try:
-                logger.info("Agent status request")
-                
-                # Get health check from orchestrator
-                health_status = await self.orchestrator.health_check()
-                
-                response_text = "**AngelaMCP Agent Status**\n\n"
-                
-                for component, status in health_status.items():
-                    if isinstance(status, dict):
-                        if status.get("status") == "healthy":
-                            emoji = "✅"
-                        else:
-                            emoji = "❌"
-                        response_text += f"{emoji} **{component.title()}**: {status.get('status', 'unknown')}\n"
+            
+            # Add strategy explanation
+            if strategy == CollaborationStrategy.SINGLE_AGENT:
+                response_text += "This task appears straightforward and can be handled efficiently by a single agent (usually Claude Code)."
+            elif strategy == CollaborationStrategy.DEBATE:
+                response_text += "This task benefits from multiple perspectives and structured debate between agents to reach the best solution."
+            elif strategy == CollaborationStrategy.CONSENSUS:
+                response_text += "This task requires agreement from multiple agents to ensure quality and completeness."
+            elif strategy == CollaborationStrategy.PARALLEL:
+                response_text += "This task can be broken down and executed in parallel by multiple agents for faster completion."
+            
+            return CallToolResult(
+                content=[TextContent(type="text", text=response_text)]
+            )
+            
+        except Exception as e:
+            logger.error(f"Task analysis failed: {e}")
+            return CallToolResult(
+                content=[TextContent(type="text", text=f"❌ Task analysis failed: {str(e)}")],
+                isError=True
+            )
+
+    async def _handle_get_agent_status(self, arguments: Dict[str, Any]) -> CallToolResult:
+        """Handle agent status requests."""
+        try:
+            logger.info("Agent status request")
+            
+            # Get health check from orchestrator
+            health_status = await self.orchestrator.health_check()
+            
+            response_text = "**AngelaMCP Agent Status**\n\n"
+            
+            for component, status in health_status.items():
+                if isinstance(status, dict):
+                    if status.get("status") == "healthy":
+                        emoji = "✅"
                     else:
-                        if "error" in str(status).lower():
-                            emoji = "❌"
-                        else:
-                            emoji = "✅"
-                        response_text += f"{emoji} **{component.title()}**: {status}\n"
-                
-                # Add configuration info
-                response_text += f"\n**Configuration:**\n"
-                response_text += f"- OpenAI Model: {settings.openai_model}\n"
-                response_text += f"- Gemini Model: {settings.gemini_model}\n"
-                response_text += f"- Claude Vote Weight: {settings.claude_vote_weight}\n"
-                response_text += f"- Debate Max Rounds: {settings.debate_max_rounds}\n"
-                response_text += f"- Cost Tracking: {'Enabled' if settings.enable_cost_tracking else 'Disabled'}\n"
-                
-                return CallToolResult(
-                    content=[TextContent(type="text", text=response_text)]
-                )
-                
-            except Exception as e:
-                logger.error(f"Agent status check failed: {e}")
-                return CallToolResult(
-                    content=[TextContent(type="text", text=f"❌ Agent status check failed: {str(e)}")],
-                    isError=True
-                )
+                        emoji = "❌"
+                    response_text += f"{emoji} **{component.title()}**: {status.get('status', 'unknown')}\n"
+                else:
+                    if "error" in str(status).lower():
+                        emoji = "❌"
+                    else:
+                        emoji = "✅"
+                    response_text += f"{emoji} **{component.title()}**: {status}\n"
+            
+            # Add configuration info
+            response_text += f"\n**Configuration:**\n"
+            response_text += f"- OpenAI Model: {settings.openai_model}\n"
+            response_text += f"- Gemini Model: {settings.gemini_model}\n"
+            response_text += f"- Claude Vote Weight: {settings.claude_vote_weight}\n"
+            response_text += f"- Debate Max Rounds: {settings.debate_max_rounds}\n"
+            response_text += f"- Cost Tracking: {'Enabled' if settings.enable_cost_tracking else 'Disabled'}\n"
+            
+            return CallToolResult(
+                content=[TextContent(type="text", text=response_text)]
+            )
+            
+        except Exception as e:
+            logger.error(f"Agent status check failed: {e}")
+            return CallToolResult(
+                content=[TextContent(type="text", text=f"❌ Agent status check failed: {str(e)}")],
+                isError=True
+            )
     
     async def run(self) -> None:
         """Run the MCP server."""
