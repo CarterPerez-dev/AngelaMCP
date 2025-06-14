@@ -31,11 +31,11 @@ async def run_mcp_server():
     """Run as MCP server for Claude Code integration."""
     try:
         logger.info("Starting AngelaMCP as MCP Server...")
-        from src.mcp_server import AngelaMCPServer
+        # Import and run the MCP server's main function directly
+        from src.mcp_server import main as mcp_main
         
-        server = AngelaMCPServer()
-        await server.initialize()
-        await server.run()
+        # Run the MCP server
+        await mcp_main()
         
     except Exception as e:
         logger.error(f"MCP server failed: {e}", exc_info=True)
@@ -81,7 +81,7 @@ async def run_standalone_cli():
         sys.exit(1)
 
 
-async def shutdown_handler(signum, frame):
+def shutdown_handler(signum, frame):
     """Handle graceful shutdown."""
     logger.info(f"Received signal {signum}, shutting down gracefully...")
     # Add cleanup logic here

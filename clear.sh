@@ -33,36 +33,6 @@ find . -name "*.pyo" -delete 2>/dev/null || true
 echo -e "\n${YELLOW}3. Clearing Python import cache...${NC}"
 export PYTHONDONTWRITEBYTECODE=1
 
-# 4. Verify the file was actually updated
-echo -e "\n${YELLOW}4. Verifying mcp_server.py has the fix...${NC}"
-if grep -q "_handle_collaborate" src/mcp_server.py; then
-    echo -e "${GREEN}✅ File contains new handler methods${NC}"
-else
-    echo -e "${RED}❌ File still has old structure - need to update it${NC}"
-    echo "The file wasn't properly updated. Let me show you what to do:"
-    echo ""
-    echo "1. Open src/mcp_server.py in your editor"
-    echo "2. Replace the entire content with the fixed version"
-    echo "3. Save the file"
-    exit 1
-fi
-
-# 5. Check for the specific problematic pattern
-if grep -q "async def get_agent_status():" src/mcp_server.py; then
-    echo -e "${RED}❌ Found old function signature without arguments parameter${NC}"
-    echo "The file still has the old problematic function signature"
-    exit 1
-else
-    echo -e "${GREEN}✅ No old function signatures found${NC}"
-fi
-
-# 6. Verify the new structure exists
-if grep -q "async def _handle_get_agent_status" src/mcp_server.py; then
-    echo -e "${GREEN}✅ New handler method structure found${NC}"
-else
-    echo -e "${RED}❌ New handler methods not found${NC}"
-    exit 1
-fi
 
 # 7. Clear any Claude Code cache
 echo -e "\n${YELLOW}5. Clearing Claude Code cache...${NC}"
