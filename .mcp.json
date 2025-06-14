@@ -5,10 +5,10 @@
       "args": [
         "run-mcp.sh"
       ],
-      "cwd": "/home/yoshi/AngelaMCP/AngelaTest",
+      "cwd": "/home/yoshi/testing/AngelaMCP",
       "env": {
-        "PYTHONPATH": "/home/yoshi/AngelaMCP/AngelaTest",
-        "PATH": "/home/yoshi/AngelaMCP/AngelaTest/venv/bin:/usr/local/bin:/usr/bin:/bin"
+        "PYTHONPATH": "/home/yoshi/testing/AngelaMCP",
+        "PATH": "/home/yoshi/testing/AngelaMCP/venv/bin:/usr/local/bin:/usr/bin:/bin"
       }
     }
   }

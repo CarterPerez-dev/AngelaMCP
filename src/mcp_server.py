@@ -376,7 +376,7 @@ class AngelaMCPServer:
                 )
         
         @self.server.call_tool()
-        async def get_agent_status() -> CallToolResult:
+        async def get_agent_status(arguments: Dict[str, Any]) -> CallToolResult:
             """Get current status of all AI agents."""
             try:
                 logger.info("Agent status request")
