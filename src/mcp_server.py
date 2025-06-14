@@ -1,8 +1,9 @@
+# src/mcp_server.py
 #!/usr/bin/env python3
 """
-MCP Server for AngelaMCP - Simplified and fixed for MCP protocol compliance.
+MCP Server for AngelaMCP - Fixed for MCP SDK compatibility.
 
-This version closely follows the MCP SDK examples to ensure compatibility.
+This version handles the initialization parameter correctly.
 """
 
 import asyncio
@@ -12,6 +13,11 @@ import logging
 from typing import Dict, Any, List, Optional, Union, Sequence
 from dataclasses import dataclass, asdict
 from contextlib import asynccontextmanager
+from pathlib import Path
+
+# Add project root to Python path
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
 
 # MCP SDK imports
 from mcp.server import Server
@@ -345,7 +351,12 @@ async def main():
         # Run the MCP server using the standard pattern
         logger.info("Starting AngelaMCP MCP Server...")
         async with stdio_server() as (read_stream, write_stream):
-            await server.run(read_stream, write_stream)
+            # The initialization_options parameter might be a dict or None
+            # Let's try passing None or an empty dict
+            initialization_options = {}
+            
+            # Run with the initialization options
+            await server.run(read_stream, write_stream, initialization_options)
             
     except KeyboardInterrupt:
         logger.info("MCP server shutdown requested")
