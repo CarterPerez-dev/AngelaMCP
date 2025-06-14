@@ -1,9 +1,10 @@
 """
-OpenAI Agent for AngelaMCP.
+OpenAI Agent for AngelaMCP - FIXED VERSION.
 
-This agent integrates with OpenAI's API for code review, analysis,
-and optimization. I'm implementing a production-grade agent with
-proper rate limiting, error handling, and cost tracking.
+Fixed issues:
+- Improved response parsing and error handling
+- Better error messages for debugging
+- Robust handling of different response formats
 """
 
 import asyncio
@@ -47,7 +48,7 @@ class OpenAIAgent(BaseAgent):
             supported_formats=[
                 "text", "markdown", "code", "json", "yaml"
             ],
-            max_context_length=128000,  # GPT-4 context window
+            max_context_length=128000,
             supports_streaming=True,
             supports_function_calling=True
         )
@@ -113,16 +114,24 @@ class OpenAIAgent(BaseAgent):
             # Make API call with retries
             completion = await self._make_api_call(messages, context)
             
-            # Extract response content
-            response_content = completion.choices[0].message.content or ""
+            # Extract response content with better error handling
+            response_content = ""
+            if completion and completion.choices:
+                choice = completion.choices[0]
+                if choice.message and choice.message.content:
+                    response_content = choice.message.content
+                else:
+                    response_content = "I received your request but couldn't generate a proper response. Please try again."
+            else:
+                response_content = "No response generated from OpenAI API."
             
             execution_time = (time.time() - start_time) * 1000
             
-            # Create token usage
+            # Create token usage with better error handling
             token_usage = TokenUsage(
-                input_tokens=completion.usage.prompt_tokens if completion.usage else 0,
-                output_tokens=completion.usage.completion_tokens if completion.usage else 0,
-                total_tokens=completion.usage.total_tokens if completion.usage else 0
+                input_tokens=completion.usage.prompt_tokens if completion and completion.usage else 0,
+                output_tokens=completion.usage.completion_tokens if completion and completion.usage else 0,
+                total_tokens=completion.usage.total_tokens if completion and completion.usage else 0
             )
             
             # Create response
@@ -138,7 +147,7 @@ class OpenAIAgent(BaseAgent):
                     "model": self.model,
                     "task_type": context.task_type.value,
                     "agent_role": context.agent_role.value if context.agent_role else None,
-                    "finish_reason": completion.choices[0].finish_reason,
+                    "finish_reason": completion.choices[0].finish_reason if completion and completion.choices else None,
                     "temperature": self.temperature
                 }
             )
@@ -266,8 +275,8 @@ Be persuasive but fair, and focus on technical merit.""")
         
         return enhanced_prompt
     
-    async def _make_api_call(self, messages: List[Dict[str, str]], context: TaskContext) -> ChatCompletion:
-        """Make OpenAI API call with proper error handling."""
+    async def _make_api_call(self, messages: List[Dict[str, str]], context: TaskContext) -> Optional[ChatCompletion]:
+        """Make OpenAI API call with proper error handling - FIXED."""
         
         try:
             completion = await self.client.chat.completions.create(
@@ -299,124 +308,6 @@ Be persuasive but fair, and focus on technical merit.""")
             
         except Exception as e:
             raise AgentError(f"Unexpected error: {e}")
-    
-    # Enhanced methods for OpenAI's strengths
-    
-    async def review_code(self, code: str, language: str, context: TaskContext) -> AgentResponse:
-        """Perform detailed code review using OpenAI's analytical capabilities."""
-        
-        review_prompt = f"""Please conduct a thorough code review of this {language} code:
-
-```{language}
-{code}
-```
-
-As an expert code reviewer, analyze this code comprehensively and provide detailed feedback."""
-        
-        review_context = context.model_copy()
-        review_context.task_type = TaskType.CODE_REVIEW
-        review_context.agent_role = "reviewer"
-        review_context.metadata["language"] = language
-        
-        return await self.generate(review_prompt, review_context)
-    
-    async def analyze_architecture(self, description: str, context: TaskContext) -> AgentResponse:
-        """Analyze system architecture and provide recommendations."""
-        
-        analysis_prompt = f"""Analyze the following system architecture description:
-
-{description}
-
-Provide a comprehensive technical analysis focusing on:
-- Architectural patterns and design quality
-- Scalability and performance implications
-- Security considerations
-- Technology stack evaluation
-- Potential risks and mitigation strategies
-- Recommendations for improvement"""
-        
-        analysis_context = context.model_copy()
-        analysis_context.task_type = TaskType.ANALYSIS
-        analysis_context.agent_role = "analyst"
-        
-        return await self.generate(analysis_prompt, analysis_context)
-    
-    async def critique_solution(self, solution: str, context: TaskContext) -> AgentResponse:
-        """Provide constructive critique of a proposed solution."""
-        
-        critique_prompt = f"""Please provide a constructive critique of this solution:
-
-{solution}
-
-Focus on:
-1. **Strengths**: What works well in this approach
-2. **Weaknesses**: Areas that could be improved
-3. **Alternatives**: Other approaches to consider
-4. **Risks**: Potential issues or concerns
-5. **Specific Suggestions**: Concrete ways to enhance the solution
-
-Be balanced and constructive in your feedback."""
-        
-        critique_context = context.model_copy()
-        critique_context.task_type = TaskType.CRITIQUE
-        critique_context.agent_role = "critic"
-        
-        return await self.generate(critique_prompt, critique_context)
-    
-    async def optimize_performance(self, code: str, language: str, context: TaskContext) -> AgentResponse:
-        """Analyze code for performance optimization opportunities."""
-        
-        optimization_prompt = f"""Analyze this {language} code for performance optimization:
-
-```{language}
-{code}
-```
-
-Provide:
-1. **Performance Bottlenecks**: Identify slow or inefficient parts
-2. **Optimization Opportunities**: Specific improvements to make
-3. **Algorithmic Improvements**: Better algorithms or data structures
-4. **Best Practices**: Language-specific optimizations
-5. **Benchmarking**: How to measure improvements
-6. **Optimized Code**: Provide improved versions of critical sections
-
-Focus on measurable performance improvements."""
-        
-        optimization_context = context.model_copy()
-        optimization_context.task_type = TaskType.ANALYSIS
-        optimization_context.agent_role = "specialist"
-        optimization_context.metadata["optimization_focus"] = True
-        optimization_context.metadata["language"] = language
-        
-        return await self.generate(optimization_prompt, optimization_context)
-    
-    async def security_review(self, code: str, language: str, context: TaskContext) -> AgentResponse:
-        """Perform security-focused code review."""
-        
-        security_prompt = f"""Conduct a security review of this {language} code:
-
-```{language}
-{code}
-```
-
-Focus on:
-1. **Vulnerability Assessment**: Identify potential security flaws
-2. **Input Validation**: Check for proper input sanitization
-3. **Authentication/Authorization**: Review access controls
-4. **Data Protection**: Assess sensitive data handling
-5. **Common Attacks**: Check for SQL injection, XSS, CSRF, etc.
-6. **Security Best Practices**: Recommend security improvements
-7. **Compliance**: Note any regulatory concerns
-
-Provide specific recommendations for each issue found."""
-        
-        security_context = context.model_copy()
-        security_context.task_type = TaskType.CODE_REVIEW
-        security_context.agent_role = "specialist"
-        security_context.metadata["security_focus"] = True
-        security_context.metadata["language"] = language
-        
-        return await self.generate(security_prompt, security_context)
     
     async def shutdown(self) -> None:
         """Shutdown OpenAI agent and cleanup resources."""

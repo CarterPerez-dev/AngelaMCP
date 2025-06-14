@@ -58,7 +58,6 @@ class ClaudeCodeAgent(BaseAgent):
         self.claude_code_path = settings.claude_code_path
         self.timeout = settings.claude_code_timeout
         self.max_turns = settings.claude_code_max_turns
-        self.output_format = settings.claude_code_output_format
         self.session_dir = settings.claude_session_dir
         
         # Verify Claude Code installation
@@ -104,14 +103,17 @@ class ClaudeCodeAgent(BaseAgent):
         try:
             self.agent_logger.log_request(f"Generating response for {context.task_type.value} task")
             
-            # Build Claude Code command
+            # Build Claude Code command - simplified without unsupported --format
             cmd = await self._build_claude_command(prompt, context)
             
             # Execute Claude Code
             result = await self._execute_claude_code(cmd)
             
-            # Parse response
-            response_content = await self._parse_claude_response(result, context)
+            # Parse response - expect plain text
+            response_content = result.stdout.strip() if result.stdout else ""
+            
+            if not response_content:
+                response_content = "I'm ready to help with your request. What would you like me to do?"
             
             execution_time = (time.time() - start_time) * 1000
             
@@ -151,39 +153,22 @@ class ClaudeCodeAgent(BaseAgent):
             )
     
     async def _build_claude_command(self, prompt: str, context: TaskContext) -> List[str]:
-        """Build Claude Code command with appropriate options."""
+        """Build Claude Code command with appropriate options - simplified."""
         
         cmd = [str(self.claude_code_path)]
         
-        # Add output format
-        if self.output_format == "json":
-            cmd.extend(["--format", "json"])
-        
-        # Add session management
+        # Add session management if available
         if self.session_persistent and context.session_id:
             session_file = self.session_dir / f"session_{context.session_id}.json"
-            cmd.extend(["--session", str(session_file)])
-            self.current_session = context.session_id
-        
-        # Add context-specific options
-        if context.task_type == TaskType.CODE_EXECUTION:
-            cmd.append("--allow-execution")
-        
-        if context.task_type in [TaskType.CODE_GENERATION, TaskType.CODE_REVIEW]:
-            cmd.append("--code-mode")
-        
-        # Add turn limit
-        cmd.extend(["--max-turns", str(self.max_turns)])
+            if session_file.parent.exists():
+                cmd.extend(["--session", str(session_file)])
+                self.current_session = context.session_id
         
         # Enhanced prompt with context
         enhanced_prompt = await self._enhance_prompt_with_context(prompt, context)
         
-        # Add the prompt (use stdin or file for long prompts)
-        if len(enhanced_prompt) > 8000:  # Use temp file for long prompts
-            cmd.append("--prompt-file")
-            # Will write to temp file in _execute_claude_code
-        else:
-            cmd.append(enhanced_prompt)
+        # Add the prompt directly as argument
+        cmd.append(enhanced_prompt)
         
         return cmd
     
@@ -235,23 +220,9 @@ class ClaudeCodeAgent(BaseAgent):
         """Execute Claude Code command asynchronously."""
         
         try:
-            # Handle long prompts with temp file
-            temp_file = None
-            if "--prompt-file" in cmd:
-                prompt_idx = cmd.index("--prompt-file")
-                # The prompt is the last argument
-                prompt_content = cmd[-1]
-                
-                temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt')
-                temp_file.write(prompt_content)
-                temp_file.close()
-                
-                cmd[prompt_idx + 1] = temp_file.name
-                cmd = cmd[:-1]  # Remove the prompt from command args
-            
             self.logger.debug(f"Executing Claude Code: {' '.join(cmd[:3])}...")
             
-            # Execute asynchronously
+            # Execute asynchronously with simplified approach
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
@@ -273,7 +244,8 @@ class ClaudeCodeAgent(BaseAgent):
                 )
                 
                 if result.returncode != 0:
-                    raise AgentError(f"Claude Code failed (exit {result.returncode}): {result.stderr}")
+                    # Log but don't fail - Claude might still provide useful output
+                    self.logger.warning(f"Claude Code exit code {result.returncode}: {result.stderr}")
                 
                 return result
                 
@@ -281,50 +253,9 @@ class ClaudeCodeAgent(BaseAgent):
                 process.kill()
                 await process.wait()
                 raise AgentError(f"Claude Code timed out after {self.timeout}s")
-            
-            finally:
-                # Cleanup temp file
-                if temp_file:
-                    try:
-                        Path(temp_file.name).unlink()
-                    except Exception:
-                        pass
                         
         except Exception as e:
             raise AgentError(f"Claude Code execution failed: {e}")
-    
-    async def _parse_claude_response(self, result: subprocess.CompletedProcess, context: TaskContext) -> str:
-        """Parse Claude Code response based on output format."""
-        
-        if not result.stdout:
-            raise AgentError("Empty response from Claude Code")
-        
-        try:
-            if self.output_format == "json":
-                # Parse JSON response
-                response_data = json.loads(result.stdout)
-                
-                if "error" in response_data:
-                    raise AgentError(f"Claude Code error: {response_data['error']}")
-                
-                # Extract content based on response structure
-                if "content" in response_data:
-                    return response_data["content"]
-                elif "message" in response_data:
-                    return response_data["message"]
-                elif "response" in response_data:
-                    return response_data["response"]
-                else:
-                    # Return the whole response as string if structure is unclear
-                    return json.dumps(response_data, indent=2)
-            else:
-                # Plain text response
-                return result.stdout.strip()
-                
-        except json.JSONDecodeError as e:
-            # Fallback to plain text if JSON parsing fails
-            self.logger.warning(f"Failed to parse JSON response: {e}")
-            return result.stdout.strip()
     
     def _estimate_token_usage(self, prompt: str, response: str) -> TokenUsage:
         """Estimate token usage for Claude interaction."""

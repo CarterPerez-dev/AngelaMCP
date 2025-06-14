@@ -1,9 +1,10 @@
 """
-Gemini Agent for AngelaMCP.
+Gemini Agent for AngelaMCP - FIXED VERSION.
 
-This agent integrates with Google's Gemini API for research, documentation,
-and best practices analysis. I'm implementing a production-grade agent with
-proper error handling and the latest Gemini 2.0 capabilities.
+Fixed issues:
+- Corrected Part.from_text() API call to use keyword argument
+- Improved error handling for API changes
+- Added fallback approaches for content creation
 """
 
 import asyncio
@@ -36,7 +37,7 @@ class GeminiAgent(BaseAgent):
             can_execute_code=False,
             can_read_files=False,
             can_write_files=False,
-            can_browse_web=False,  # Limited in current version
+            can_browse_web=False,
             can_use_tools=True,
             supported_languages=[
                 "python", "javascript", "typescript", "java", "cpp", "c", 
@@ -46,7 +47,7 @@ class GeminiAgent(BaseAgent):
             supported_formats=[
                 "text", "markdown", "code", "json", "yaml", "xml"
             ],
-            max_context_length=1000000,  # Gemini 2.0 has very large context
+            max_context_length=1000000,
             supports_streaming=True,
             supports_function_calling=True
         )
@@ -236,7 +237,7 @@ Provide thoughtful, research-backed contributions to the discussion.""")
         return enhanced_prompt
     
     async def _make_api_call(self, prompt: str, context: TaskContext) -> Any:
-        """Make Gemini API call with proper error handling."""
+        """Make Gemini API call with proper error handling - FIXED."""
         
         try:
             # Configure generation parameters
@@ -248,11 +249,23 @@ Provide thoughtful, research-backed contributions to the discussion.""")
                 candidate_count=1
             )
             
+            # Create content with proper API call - FIXED
+            try:
+                # Try the new API format first
+                content = types.Part.from_text(text=prompt)
+            except TypeError:
+                # Fallback to older format if new one fails
+                try:
+                    content = types.Part(text=prompt)
+                except:
+                    # Final fallback - use string directly
+                    content = prompt
+            
             # Make the API call
             response = await asyncio.to_thread(
                 self.client.models.generate_content,
                 model=self.model,
-                contents=types.Part.from_text(prompt),
+                contents=content,
                 config=config
             )
             
@@ -280,8 +293,7 @@ Provide thoughtful, research-backed contributions to the discussion.""")
         """Estimate token usage for Gemini interaction."""
         
         # Rough token estimation for Gemini
-        # Gemini uses different tokenization than OpenAI
-        prompt_tokens = len(prompt.split()) * 1.2  # Gemini tokens are slightly different
+        prompt_tokens = len(prompt.split()) * 1.2
         response_tokens = len(response.split()) * 1.2
         
         return TokenUsage(
@@ -289,8 +301,6 @@ Provide thoughtful, research-backed contributions to the discussion.""")
             output_tokens=int(response_tokens),
             total_tokens=int(prompt_tokens + response_tokens)
         )
-    
-    # Enhanced methods for Gemini's strengths
     
     async def research_topic(self, topic: str, context: TaskContext) -> AgentResponse:
         """Conduct comprehensive research on a topic."""
@@ -349,271 +359,6 @@ Provide comprehensive, well-structured information that would be valuable to bot
         research_context.metadata["research_topic"] = topic
         
         return await self.generate(research_prompt, research_context)
-    
-    async def create_documentation(self, subject: str, audience: str, context: TaskContext) -> AgentResponse:
-        """Create comprehensive documentation."""
-        
-        documentation_prompt = f"""Create comprehensive documentation for:
-
-**Subject:** {subject}
-**Target Audience:** {audience}
-
-Please provide complete documentation including:
-
-1. **Introduction and Overview**
-   - Purpose and scope
-   - Audience and prerequisites
-   - Document structure and navigation
-
-2. **Getting Started Guide**
-   - Quick start instructions
-   - Setup and installation
-   - Basic configuration
-
-3. **Detailed Reference**
-   - Complete feature descriptions
-   - API or interface documentation
-   - Configuration options and parameters
-
-4. **Tutorials and Examples**
-   - Step-by-step tutorials
-   - Working code examples
-   - Common use cases and scenarios
-
-5. **Best Practices and Guidelines**
-   - Recommended approaches
-   - Performance considerations
-   - Security and maintenance guidelines
-
-6. **Troubleshooting and FAQ**
-   - Common issues and solutions
-   - Debugging techniques
-   - Frequently asked questions
-
-7. **Advanced Topics**
-   - Complex configurations
-   - Integration scenarios
-   - Customization and extension
-
-8. **Resources and Support**
-   - Additional learning materials
-   - Community resources
-   - Support channels
-
-Ensure the documentation is clear, complete, and professionally structured."""
-        
-        documentation_context = context.model_copy()
-        documentation_context.task_type = TaskType.DOCUMENTATION
-        documentation_context.agent_role = "documentation_specialist"
-        documentation_context.metadata["subject"] = subject
-        documentation_context.metadata["audience"] = audience
-        
-        return await self.generate(documentation_prompt, documentation_context)
-    
-    async def analyze_best_practices(self, domain: str, context: TaskContext) -> AgentResponse:
-        """Analyze and provide best practices for a domain."""
-        
-        best_practices_prompt = f"""Analyze and provide comprehensive best practices for:
-
-**Domain:** {domain}
-
-Please provide a detailed best practices guide covering:
-
-1. **Industry Standards and Guidelines**
-   - Recognized standards and frameworks
-   - Regulatory requirements and compliance
-   - Professional certification requirements
-
-2. **Core Principles and Methodologies**
-   - Fundamental principles to follow
-   - Proven methodologies and approaches
-   - Quality assurance practices
-
-3. **Implementation Best Practices**
-   - Step-by-step implementation guidance
-   - Configuration and setup recommendations
-   - Performance optimization techniques
-
-4. **Security and Compliance**
-   - Security best practices and considerations
-   - Data protection and privacy requirements
-   - Audit and compliance procedures
-
-5. **Quality Assurance and Testing**
-   - Testing strategies and methodologies
-   - Quality metrics and measurement
-   - Continuous improvement processes
-
-6. **Team and Process Management**
-   - Team organization and roles
-   - Workflow and collaboration practices
-   - Communication and documentation standards
-
-7. **Tools and Technology Stack**
-   - Recommended tools and platforms
-   - Technology selection criteria
-   - Integration and compatibility considerations
-
-8. **Monitoring and Maintenance**
-   - Performance monitoring practices
-   - Maintenance schedules and procedures
-   - Incident response and recovery
-
-9. **Common Pitfalls and How to Avoid Them**
-   - Frequent mistakes and anti-patterns
-   - Warning signs and red flags
-   - Prevention and mitigation strategies
-
-10. **Future Considerations**
-    - Emerging trends and technologies
-    - Scalability and evolution planning
-    - Long-term sustainability practices
-
-Provide actionable, evidence-based recommendations that reflect current industry standards."""
-        
-        best_practices_context = context.model_copy()
-        best_practices_context.task_type = TaskType.ANALYSIS
-        best_practices_context.agent_role = "best_practices_expert"
-        best_practices_context.metadata["domain"] = domain
-        
-        return await self.generate(best_practices_prompt, best_practices_context)
-    
-    async def comparative_analysis(self, options: List[str], criteria: str, context: TaskContext) -> AgentResponse:
-        """Perform comparative analysis of multiple options."""
-        
-        options_text = "\n".join(f"- {option}" for option in options)
-        
-        comparison_prompt = f"""Perform a comprehensive comparative analysis of the following options:
-
-**Options to Compare:**
-{options_text}
-
-**Evaluation Criteria:** {criteria}
-
-Please provide a detailed comparison including:
-
-1. **Executive Summary**
-   - Key findings and recommendations
-   - Best option for different use cases
-   - Critical decision factors
-
-2. **Individual Option Analysis**
-   For each option, provide:
-   - Overview and key features
-   - Strengths and advantages
-   - Weaknesses and limitations
-   - Ideal use cases and scenarios
-
-3. **Side-by-Side Comparison**
-   - Feature comparison matrix
-   - Performance and scalability comparison
-   - Cost and resource requirements
-   - Learning curve and adoption difficulty
-
-4. **Criteria-Based Evaluation**
-   - Detailed scoring against evaluation criteria
-   - Weighted importance of different factors
-   - Objective assessment and ranking
-
-5. **Use Case Recommendations**
-   - Best option for specific scenarios
-   - Situation-dependent recommendations
-   - Hybrid or combined approaches
-
-6. **Implementation Considerations**
-   - Migration and adoption strategies
-   - Resource and timeline requirements
-   - Risk assessment and mitigation
-
-7. **Future Outlook**
-   - Long-term viability and support
-   - Development roadmap and community
-   - Emerging alternatives and trends
-
-8. **Decision Framework**
-   - Key questions to ask
-   - Decision tree or flowchart
-   - Implementation roadmap
-
-Provide objective, evidence-based analysis that helps make informed decisions."""
-        
-        comparison_context = context.model_copy()
-        comparison_context.task_type = TaskType.ANALYSIS
-        comparison_context.agent_role = "analyst"
-        comparison_context.metadata["comparison_type"] = "multi_option"
-        comparison_context.metadata["options_count"] = len(options)
-        
-        return await self.generate(comparison_prompt, comparison_context)
-    
-    async def explain_concept(self, concept: str, complexity_level: str, context: TaskContext) -> AgentResponse:
-        """Explain complex concepts clearly and comprehensively."""
-        
-        explanation_prompt = f"""Provide a comprehensive explanation of the following concept:
-
-**Concept:** {concept}
-**Complexity Level:** {complexity_level}
-
-Please structure your explanation as follows:
-
-1. **Simple Definition**
-   - Clear, concise explanation in plain language
-   - Key characteristics and properties
-   - Why this concept is important
-
-2. **Background and Context**
-   - Historical development
-   - Related concepts and relationships
-   - Current relevance and applications
-
-3. **Detailed Explanation**
-   - In-depth technical description
-   - Components and mechanisms
-   - How it works step-by-step
-
-4. **Real-World Examples**
-   - Practical applications and use cases
-   - Industry examples and implementations
-   - Success stories and case studies
-
-5. **Benefits and Advantages**
-   - Why this concept is valuable
-   - Problems it solves
-   - Competitive advantages
-
-6. **Challenges and Limitations**
-   - Common difficulties and obstacles
-   - Limitations and constraints
-   - When not to use this concept
-
-7. **Implementation Guidelines**
-   - How to get started
-   - Step-by-step implementation process
-   - Tools and resources needed
-
-8. **Best Practices**
-   - Proven approaches and methodologies
-   - Tips for success
-   - Common mistakes to avoid
-
-9. **Advanced Topics**
-   - Complex scenarios and edge cases
-   - Advanced techniques and optimizations
-   - Future developments and research
-
-10. **Learning Resources**
-    - Recommended reading and materials
-    - Training and certification options
-    - Community and expert resources
-
-Tailor the explanation to the specified complexity level while maintaining accuracy and completeness."""
-        
-        explanation_context = context.model_copy()
-        explanation_context.task_type = TaskType.DOCUMENTATION
-        explanation_context.agent_role = "technical_writer"
-        explanation_context.metadata["concept"] = concept
-        explanation_context.metadata["complexity_level"] = complexity_level
-        
-        return await self.generate(explanation_prompt, explanation_context)
     
     async def shutdown(self) -> None:
         """Shutdown Gemini agent and cleanup resources."""
