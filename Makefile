@@ -79,7 +79,7 @@ install:
 	@echo "🐍 Installing Python dependencies..."
 	@test -d venv || python3 -m venv venv 
 	$(PYTHON) -m pip install --upgrade pip
-	$(PYTHON) -m pip install -r requirements.t`
+	$(PYTHON) -m pip install -r requirements.txt
 	@echo "✅ Python dependencies installed"
         
 # Setup environment file
@@ -119,7 +119,8 @@ run:
 # Run as MCP server
 run-mcp:
 	@echo "🧙‍♀️ Starting AngelaMCP MCP server..."
-	python -m src.main mcp-server
+	@chmod +x run-mcp.sh
+	./run-mcp.sh
 
 # Run development mode with debug
 run-dev:
@@ -130,6 +131,7 @@ run-dev:
 mcp-register:
 	@echo "💃 Registering AngelaMCP with Claude Code..."
 	@if command -v claude >/dev/null 2>&1; then \
+		chmod +x $(PWD)/run-mcp.sh && \
 		claude mcp add angelamcp "$(PWD)/run-mcp.sh" && \
 		echo "✅ MCP server registered successfully" && \
 		echo "Test with: claude 'Use AngelaMCP to help with a task'"; \

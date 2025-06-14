@@ -20,14 +20,11 @@ from mcp import stdio_server
 from mcp.types import TextContent, CallToolResult
 
 # AngelaMCP imports
-from config import settings
-from src.agents import ClaudeCodeAgent
-from src.agents import OpenAIAgent  
-from src.agents import GeminiAgent
+from config.settings import settings
+from src.agents import ClaudeCodeAgent, OpenAIAgent, GeminiAgent, TaskContext, TaskType
 from src.orchestrator import TaskOrchestrator, CollaborationStrategy
-from src.agents import TaskContext, TaskType
-from src.persistence import DatabaseManager
-from src.utils import get_logger
+from src.persistence.database import DatabaseManager
+from src.utils.logger import get_logger
 
 logger = get_logger("mcp_server")
 

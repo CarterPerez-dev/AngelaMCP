@@ -115,8 +115,9 @@ async def verify_database_setup():
 async def main():
     """Main initialization function."""
     try:
-        logger.info(" Starting AngelaMCP database initialization...")
+        logger.info("🗄️ Starting AngelaMCP database initialization...")
 
+        await create_database_if_not_exists()
         await create_tables()
         await verify_database_setup()
 

@@ -19,8 +19,8 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 # Import configuration first
-from config import settings
-from src.utils import setup_logging, get_logger
+from config.settings import settings
+from src.utils.logger import setup_logging, get_logger
 
 # Set up logging early
 setup_logging()
@@ -48,10 +48,8 @@ async def run_standalone_cli():
         logger.info("Starting AngelaMCP as standalone CLI...")
         from src.cli import CLI
         from src.orchestrator import TaskOrchestrator
-        from src.persistence import DatabaseManager
-        from src.agents import ClaudeCodeAgent
-        from src.agents import OpenAIAgent
-        from src.agents import GeminiAgent
+        from src.persistence.database import DatabaseManager
+        from src.agents import ClaudeCodeAgent, OpenAIAgent, GeminiAgent
         
         # Initialize database
         db_manager = DatabaseManager()

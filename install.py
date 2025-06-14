@@ -407,6 +407,9 @@ ENABLE_DEBATE_MODE=true
     
     def _register_mcp(self) -> None:
         """Register MCP server with Claude Code."""
+        # Always create .mcp.json file with dynamic paths
+        self._create_mcp_json()
+        
         if self.config.claude_code_path:
             try:
                 # Use clean register to remove any old servers first
@@ -417,6 +420,28 @@ ENABLE_DEBATE_MODE=true
                 self._run_command('claude mcp remove angelamcp 2>/dev/null || true')
                 self._run_command('claude mcp remove multi-ai-collab 2>/dev/null || true')
                 self._run_command('claude mcp add angelamcp "python -m src.main mcp-server"')
+    
+    def _create_mcp_json(self) -> None:
+        """Create .mcp.json file with correct paths for the current installation."""
+        mcp_config = {
+            "mcpServers": {
+                "angelamcp": {
+                    "command": "bash",
+                    "args": ["run-mcp.sh"],
+                    "cwd": str(self.project_root.absolute()),
+                    "env": {
+                        "PYTHONPATH": str(self.project_root.absolute()),
+                        "PATH": f"{self.project_root.absolute() / 'venv' / 'bin'}:/usr/local/bin:/usr/bin:/bin"
+                    }
+                }
+            }
+        }
+        
+        mcp_json_path = self.project_root / ".mcp.json"
+        with open(mcp_json_path, 'w') as f:
+            json.dump(mcp_config, f, indent=2)
+        
+        self.console.print(f"✅ Created .mcp.json at {mcp_json_path}", style="green")
     
     def _verify_installation(self) -> None:
         """Verify the complete installation."""

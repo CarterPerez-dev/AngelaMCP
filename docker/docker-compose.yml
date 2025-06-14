@@ -1,43 +1,62 @@
+version: '3.8'
 
 services:
-  app:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    container_name: angelamcp
-    env_file:
-      - ../.env
-      - ../.env.docker
-    depends_on:
-      - postgres
-      - redis
-    volumes:
-      - ..:/app
-      - ~/.claude:/home/angelamcp/.claude:ro
-    stdin_open: true
-    tty: true
+  # Only PostgreSQL and Redis for now - MCP server runs on host
+  # app:
+  #   build:
+  #     context: ..
+  #     dockerfile: docker/Dockerfile
+  #   container_name: angelamcp
+  #   env_file:
+  #     - ../.env
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #   volumes:
+  #     - ..:/app
+  #   stdin_open: true
+  #   tty: true
 
   postgres:
     image: postgres:14-alpine
     container_name: angelamcp_postgres
     environment:
-      POSTGRES_USER: ${DATABASE_USER}
-      POSTGRES_PASSWORD: ${DATABASE_PASSWORD}
-      POSTGRES_DB: ${DATABASE_NAME}
+      POSTGRES_USER: ${DATABASE_USER:-angelamcp}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:-angelamcp_pass}
+      POSTGRES_DB: ${DATABASE_NAME:-angelamcp_db}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --lc-collate=C --lc-ctype=C"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
     ports:
-      - "5432:5432"
+      - "${DATABASE_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USER:-angelamcp} -d ${DATABASE_NAME:-angelamcp_db}"]
+      interval: 10s
+      retries: 5
+      start_period: 30s
+      timeout: 5s
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
     container_name: angelamcp_redis
-    env_file:
-      - ../.env
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-angelamcp_redis}
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-angelamcp_redis}
     volumes:
       - redis_data:/data
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-angelamcp_redis}", "ping"]
+      interval: 10s
+      retries: 3
+      start_period: 10s
+      timeout: 5s
+    restart: unless-stopped
 
 volumes:
   postgres_data:
