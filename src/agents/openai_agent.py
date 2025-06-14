@@ -2,10 +2,10 @@
 OpenAI Agent for AngelaMCP - FIXED VERSION.
 
 Fixed issues:
-- Improved error handling to prevent "'error'" messages
+- Updated max_tokens to max_completion_tokens for newer OpenAI models
+- Improved error handling to prevent logging KeyErrors
 - Better response parsing and validation
 - More robust exception handling with specific error types
-- Added fallback responses for better user experience
 """
 
 import asyncio
@@ -77,6 +77,9 @@ class OpenAIAgent(BaseAgent):
             timeout=self.timeout,
             max_retries=self.max_retries
         )
+        
+        # Check if this is a reasoning model that uses different parameters
+        self.is_reasoning_model = any(model_type in self.model.lower() for model_type in ['o1', 'o3'])
         
         # Verify API key
         self._verify_api_key()
@@ -150,7 +153,8 @@ class OpenAIAgent(BaseAgent):
                     "task_type": context.task_type.value,
                     "agent_role": context.agent_role.value if context.agent_role else None,
                     "finish_reason": completion.choices[0].finish_reason if completion and completion.choices else None,
-                    "temperature": self.temperature
+                    "temperature": self.temperature,
+                    "is_reasoning_model": self.is_reasoning_model
                 }
             )
             
@@ -161,9 +165,9 @@ class OpenAIAgent(BaseAgent):
             execution_time = (time.time() - start_time) * 1000
             
             # I'll log the detailed error but provide a helpful response instead of failing
-            detailed_error = str(e)
-            self.logger.error(f"OpenAI generation error: {detailed_error}")
-            self.agent_logger.log_error(f"OpenAI API error: {detailed_error}", e)
+            error_str = str(e)
+            self.logger.error(f"OpenAI generation error: {error_str}")
+            self.agent_logger.log_error(f"OpenAI API error: {error_str}", e)
             
             # Generate fallback response so the system can continue
             fallback_content = await self._generate_fallback_response(prompt, context)
@@ -175,8 +179,8 @@ class OpenAIAgent(BaseAgent):
                 success=True,  # Mark as success with fallback content
                 confidence=0.6,  # Lower confidence for fallback
                 execution_time_ms=execution_time,
-                error=f"API Error (using fallback): {detailed_error}",
-                metadata={"fallback_used": True, "original_error": detailed_error}
+                error=f"API Error (using fallback): {error_str}",
+                metadata={"fallback_used": True, "original_error": error_str}
             )
     
     async def _build_messages(self, prompt: str, context: TaskContext) -> List[Dict[str, str]]:
@@ -285,16 +289,26 @@ Be persuasive but fair, and focus on technical merit.""")
         try:
             self.logger.debug(f"Making OpenAI API call with {len(messages)} messages")
             
-            completion = await self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-                top_p=self.top_p,
-                frequency_penalty=self.frequency_penalty,
-                presence_penalty=self.presence_penalty,
-                timeout=self.timeout
-            )
+            # Build API parameters - handle different model types
+            api_params = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": self.temperature,
+                "top_p": self.top_p,
+                "frequency_penalty": self.frequency_penalty,
+                "presence_penalty": self.presence_penalty,
+                "timeout": self.timeout
+            }
+            
+            # Use correct parameter name based on model type
+            if self.is_reasoning_model:
+                # Reasoning models (o1, o3) use max_completion_tokens
+                api_params["max_completion_tokens"] = self.max_tokens
+            else:
+                # Regular models use max_tokens
+                api_params["max_tokens"] = self.max_tokens
+            
+            completion = await self.client.chat.completions.create(**api_params)
             
             self.logger.debug("OpenAI API call successful")
             return completion
@@ -310,6 +324,11 @@ Be persuasive but fair, and focus on technical merit.""")
             
         except openai.BadRequestError as e:
             self.logger.error(f"OpenAI bad request: {e}")
+            # Check if it's the max_tokens issue and try to auto-fix
+            if "max_tokens" in str(e) and "max_completion_tokens" in str(e):
+                self.logger.info("Detected max_tokens parameter issue, switching to reasoning model mode")
+                self.is_reasoning_model = True
+                return await self._make_api_call(messages, context)  # Retry once
             raise AgentError(f"Bad request to OpenAI API: {str(e)}")
             
         except openai.APIError as e:

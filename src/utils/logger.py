@@ -1,8 +1,11 @@
 """
-Logging configuration for AngelaMCP.
+Logging configuration for AngelaMCP - FIXED VERSION.
 
-Complete logging system with structured logging, performance monitoring,
-and context tracking for multi-agent collaboration.
+Fixed issues:
+- Resolved KeyError when logging exceptions 
+- Improved error handling in the InterceptHandler
+- Better string formatting for log messages
+- More robust exception handling in logging
 """
 
 import asyncio
@@ -209,10 +212,10 @@ def setup_logging() -> None:
 
 
 class InterceptHandler(logging.Handler):
-    """Intercept standard library logs and redirect to loguru."""
+    """Intercept standard library logs and redirect to loguru - FIXED."""
     
     def emit(self, record: logging.LogRecord) -> None:
-        """Emit log record through loguru."""
+        """Emit log record through loguru - with improved error handling."""
         
         # Get corresponding loguru level
         try:
@@ -222,20 +225,33 @@ class InterceptHandler(logging.Handler):
         
         # Find caller from where originated the logged message
         frame, depth = logging.currentframe(), 2
-        while frame.f_code.co_filename == logging.__file__:
+        while frame and frame.f_code.co_filename == logging.__file__:
             frame = frame.f_back
             depth += 1
         
-        # Add context information with defaults
+        # Add context information with defaults and safe string formatting
         extra = {
             "request_id": request_id_var.get() or "unknown",
             "session_id": session_id_var.get() or "unknown", 
             "agent_name": agent_name_var.get() or "unknown"
         }
         
-        loguru_logger.opt(depth=depth, exception=record.exc_info).log(
-            level, record.getMessage(), **extra
-        )
+        try:
+            # Safely get the message - this is where the KeyError was happening
+            message = record.getMessage()
+        except (KeyError, ValueError, TypeError) as e:
+            # If message formatting fails, use the raw message
+            message = getattr(record, 'msg', str(record.args[0]) if record.args else 'Log message formatting error')
+            # Add info about the formatting error
+            extra['message_format_error'] = str(e)
+        
+        try:
+            loguru_logger.opt(depth=depth, exception=record.exc_info).log(
+                level, message, **extra
+            )
+        except Exception as e:
+            # Fallback logging if loguru fails
+            print(f"Logging error: {e}, original message: {message}", file=sys.stderr)
 
 
 def get_logger(name: str) -> logging.Logger:
@@ -253,7 +269,11 @@ def get_logger(name: str) -> logging.Logger:
             "agent_name": agent_name_var.get() or "unknown",
             **context
         }
-        logger.log(level, msg, extra=extra)
+        try:
+            logger.log(level, msg, extra=extra)
+        except Exception as e:
+            # Fallback if logging fails
+            print(f"Logging failed: {e}, message: {msg}", file=sys.stderr)
     
     def debug_context(msg: str, **context):
         """Debug log with context."""
@@ -290,25 +310,37 @@ class AgentLogger:
     def log_request(self, message: str, **context):
         """Log an agent request."""
         with log_context(agent_name=self.agent_name):
-            self.logger.info(f"[REQUEST] {message}", extra=context)
+            try:
+                self.logger.info(f"[REQUEST] {message}", extra=context)
+            except Exception as e:
+                print(f"Agent logging error: {e}", file=sys.stderr)
     
     def log_response(self, message: str, **context):
         """Log an agent response."""
         with log_context(agent_name=self.agent_name):
-            self.logger.info(f"[RESPONSE] {message}", extra=context)
+            try:
+                self.logger.info(f"[RESPONSE] {message}", extra=context)
+            except Exception as e:
+                print(f"Agent logging error: {e}", file=sys.stderr)
     
     def log_error(self, message: str, error: Exception = None, **context):
         """Log an agent error."""
         with log_context(agent_name=self.agent_name):
-            self.logger.error(f"[ERROR] {message}", exc_info=error, extra=context)
+            try:
+                self.logger.error(f"[ERROR] {message}", exc_info=error, extra=context)
+            except Exception as e:
+                print(f"Agent logging error: {e}, original: {message}", file=sys.stderr)
     
     def log_performance(self, operation: str, duration: float, **context):
         """Log performance metrics."""
         with log_context(agent_name=self.agent_name):
-            self.logger.info(
-                f"[PERFORMANCE] {operation} completed in {duration:.3f}s",
-                extra={"operation": operation, "duration_seconds": duration, **context}
-            )
+            try:
+                self.logger.info(
+                    f"[PERFORMANCE] {operation} completed in {duration:.3f}s",
+                    extra={"operation": operation, "duration_seconds": duration, **context}
+                )
+            except Exception as e:
+                print(f"Performance logging error: {e}", file=sys.stderr)
 
 
 class DebateLogger:
@@ -319,41 +351,50 @@ class DebateLogger:
     
     def log_debate_start(self, debate_id: str, topic: str, participants: list):
         """Log start of debate."""
-        self.logger.info(
-            f"🎭 Starting debate {debate_id[:8]}: {topic}",
-            extra={
-                "debate_id": debate_id,
-                "topic": topic,
-                "participants": participants,
-                "event": "debate_start"
-            }
-        )
+        try:
+            self.logger.info(
+                f"🎭 Starting debate {debate_id[:8]}: {topic}",
+                extra={
+                    "debate_id": debate_id,
+                    "topic": topic,
+                    "participants": participants,
+                    "event": "debate_start"
+                }
+            )
+        except Exception as e:
+            print(f"Debate logging error: {e}", file=sys.stderr)
     
     def log_debate_round(self, debate_id: str, round_num: int, phase: str):
         """Log debate round progress."""
-        self.logger.info(
-            f"⚡ Debate {debate_id[:8]} Round {round_num}: {phase}",
-            extra={
-                "debate_id": debate_id,
-                "round_number": round_num,
-                "phase": phase,
-                "event": "debate_round"
-            }
-        )
+        try:
+            self.logger.info(
+                f"⚡ Debate {debate_id[:8]} Round {round_num}: {phase}",
+                extra={
+                    "debate_id": debate_id,
+                    "round_number": round_num,
+                    "phase": phase,
+                    "event": "debate_round"
+                }
+            )
+        except Exception as e:
+            print(f"Debate logging error: {e}", file=sys.stderr)
     
     def log_debate_end(self, debate_id: str, success: bool, consensus_score: float):
         """Log end of debate."""
-        emoji = "🏆" if success else "❌"
-        self.logger.info(
-            f"{emoji} Debate {debate_id[:8]} {'completed' if success else 'failed'} "
-            f"(consensus: {consensus_score:.2f})",
-            extra={
-                "debate_id": debate_id,
-                "success": success,
-                "consensus_score": consensus_score,
-                "event": "debate_end"
-            }
-        )
+        try:
+            emoji = "🏆" if success else "❌"
+            self.logger.info(
+                f"{emoji} Debate {debate_id[:8]} {'completed' if success else 'failed'} "
+                f"(consensus: {consensus_score:.2f})",
+                extra={
+                    "debate_id": debate_id,
+                    "success": success,
+                    "consensus_score": consensus_score,
+                    "event": "debate_end"
+                }
+            )
+        except Exception as e:
+            print(f"Debate logging error: {e}", file=sys.stderr)
 
 
 class VotingLogger:
@@ -364,41 +405,50 @@ class VotingLogger:
     
     def log_voting_start(self, voting_id: str, proposals_count: int):
         """Log start of voting."""
-        self.logger.info(
-            f"🗳️ Starting voting {voting_id[:8]} on {proposals_count} proposals",
-            extra={
-                "voting_id": voting_id,
-                "proposals_count": proposals_count,
-                "event": "voting_start"
-            }
-        )
+        try:
+            self.logger.info(
+                f"🗳️ Starting voting {voting_id[:8]} on {proposals_count} proposals",
+                extra={
+                    "voting_id": voting_id,
+                    "proposals_count": proposals_count,
+                    "event": "voting_start"
+                }
+            )
+        except Exception as e:
+            print(f"Voting logging error: {e}", file=sys.stderr)
     
     def log_vote_cast(self, voting_id: str, agent: str, vote_type: str, confidence: float):
         """Log individual vote."""
-        self.logger.info(
-            f"✅ Vote cast by {agent}: {vote_type} (confidence: {confidence:.2f})",
-            extra={
-                "voting_id": voting_id,
-                "agent": agent,
-                "vote_type": vote_type,
-                "confidence": confidence,
-                "event": "vote_cast"
-            }
-        )
+        try:
+            self.logger.info(
+                f"✅ Vote cast by {agent}: {vote_type} (confidence: {confidence:.2f})",
+                extra={
+                    "voting_id": voting_id,
+                    "agent": agent,
+                    "vote_type": vote_type,
+                    "confidence": confidence,
+                    "event": "vote_cast"
+                }
+            )
+        except Exception as e:
+            print(f"Voting logging error: {e}", file=sys.stderr)
     
     def log_voting_end(self, voting_id: str, winner: Optional[str], consensus_reached: bool):
         """Log end of voting."""
-        emoji = "🏆" if winner else "🤷"
-        self.logger.info(
-            f"{emoji} Voting {voting_id[:8]} completed: Winner is {winner or 'None'} "
-            f"(consensus: {'Yes' if consensus_reached else 'No'})",
-            extra={
-                "voting_id": voting_id,
-                "winner": winner,
-                "consensus_reached": consensus_reached,
-                "event": "voting_end"
-            }
-        )
+        try:
+            emoji = "🏆" if winner else "🤷"
+            self.logger.info(
+                f"{emoji} Voting {voting_id[:8]} completed: Winner is {winner or 'None'} "
+                f"(consensus: {'Yes' if consensus_reached else 'No'})",
+                extra={
+                    "voting_id": voting_id,
+                    "winner": winner,
+                    "consensus_reached": consensus_reached,
+                    "event": "voting_end"
+                }
+            )
+        except Exception as e:
+            print(f"Voting logging error: {e}", file=sys.stderr)
 
 
 # Performance monitoring decorator
@@ -423,26 +473,32 @@ def log_agent_interaction(agent_name: str, action: str, details: Dict[str, Any] 
     logger = get_logger("agents.interactions")
     
     with log_context(agent_name=agent_name):
-        logger.info(
-            f"Agent {agent_name}: {action}",
-            extra={
-                "agent": agent_name,
-                "action": action,
-                "details": details or {},
-                "event": "agent_interaction"
-            }
-        )
+        try:
+            logger.info(
+                f"Agent {agent_name}: {action}",
+                extra={
+                    "agent": agent_name,
+                    "action": action,
+                    "details": details or {},
+                    "event": "agent_interaction"
+                }
+            )
+        except Exception as e:
+            print(f"Agent interaction logging error: {e}", file=sys.stderr)
 
 
 def log_collaboration_event(event_type: str, details: Dict[str, Any] = None):
     """Log collaboration events."""
     logger = get_logger("orchestrator.collaboration")
     
-    logger.info(
-        f"Collaboration event: {event_type}",
-        extra={
-            "event_type": event_type,
-            "details": details or {},
-            "event": "collaboration"
-        }
-    )
+    try:
+        logger.info(
+            f"Collaboration event: {event_type}",
+            extra={
+                "event_type": event_type,
+                "details": details or {},
+                "event": "collaboration"
+            }
+        )
+    except Exception as e:
+        print(f"Collaboration logging error: {e}", file=sys.stderr)
