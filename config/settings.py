@@ -190,15 +190,6 @@ class Settings(BaseSettings):
         env="WORKSPACE_DIR"
     )
     max_file_size: int = Field(default=10485760, env="MAX_FILE_SIZE")  # 10MB
-    allowed_file_extensions: List[str] = Field(
-        default=[
-            "py", "js", "ts", "java", "cpp", "c", "h", "md", "txt", 
-            "json", "yaml", "yml", "toml", "ini", "cfg", "conf", 
-            "sh", "bash"
-        ],
-        env="ALLOWED_FILE_EXTENSIONS",
-        json_schema_mode="python"
-    )
     auto_save_interval: int = Field(default=60, env="AUTO_SAVE_INTERVAL")
     
     # ============================================
@@ -278,14 +269,6 @@ class Settings(BaseSettings):
             expanded_path.mkdir(parents=True, exist_ok=True)
             
         return expanded_path 
-
-    @field_validator("allowed_file_extensions")
-    @classmethod
-    def parse_file_extensions(cls, v: Any) -> List[str]:
-        """Parse file extensions from string or list."""
-        if isinstance(v, str):
-            return [ext.strip() for ext in v.split(",")]
-        return v
 
     @field_validator("blocked_commands")
     @classmethod
