@@ -135,7 +135,7 @@ class AngelaMCPVerifier:
 
     def check_project_containers(self) -> Tuple[str, str]:
         """Checks if the required project containers are running."""
-        required = ["angelamcp", "angelamcp_postgres", "angelamcp_redis"]
+        required = ["angelamcp_postgres", "angelamcp_redis"]
         try:
             result = subprocess.run(["docker", "ps", "--format", "{{.Names}}"], capture_output=True, text=True, check=True)
             running_containers = result.stdout.strip().split('\n')

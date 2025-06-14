@@ -196,7 +196,8 @@ class Settings(BaseSettings):
             "json", "yaml", "yml", "toml", "ini", "cfg", "conf", 
             "sh", "bash"
         ],
-        env="ALLOWED_FILE_EXTENSIONS"
+        env="ALLOWED_FILE_EXTENSIONS",
+        json_schema_mode="python"
     )
     auto_save_interval: int = Field(default=60, env="AUTO_SAVE_INTERVAL")
     
@@ -208,7 +209,8 @@ class Settings(BaseSettings):
     max_input_length: int = Field(default=100000, env="MAX_INPUT_LENGTH")
     blocked_commands: List[str] = Field(
         default=["format", "del", "rm", "sudo", "su"],
-        env="BLOCKED_COMMANDS"
+        env="BLOCKED_COMMANDS",
+        json_schema_mode="python"
     )
     sandbox_mode: bool = Field(default=False, env="SANDBOX_MODE")
     

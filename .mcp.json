@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "angelamcp": {
+      "command": "bash",
+      "args": [
+        "run-mcp.sh"
+      ],
+      "cwd": "/home/yoshi/AngelaMCP/AngelaTest",
+      "env": {
+        "PYTHONPATH": "/home/yoshi/AngelaMCP/AngelaTest",
+        "PATH": "/home/yoshi/AngelaMCP/AngelaTest/venv/bin:/usr/local/bin:/usr/bin:/bin"
+      }
+    }
+  }
+}

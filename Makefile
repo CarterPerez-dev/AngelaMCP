@@ -99,22 +99,22 @@ db-setup: db-init db-verify
 # Initialize database
 db-init:
 	@echo "🗄️ Initializing database..."
-	python scripts/init_db.py
+	$(PYTHON) scripts/init_db.py
 
 # Verify database setup
 db-verify:
 	@echo "🔍 Verifying database..."
-	python -c "import asyncio; from src.persistence.database import DatabaseManager; asyncio.run(DatabaseManager().initialize())"
+	$(PYTHON) -c "import asyncio; from src.persistence.database import DatabaseManager; asyncio.run(DatabaseManager().initialize())"
 
 # Verify complete setup
 verify:
 	@echo "🔍 Verifying AngelaMCP setup..."
-	python scripts/verify_setup.py
+	$(PYTHON) scripts/verify_setup.py
 
 # Run AngelaMCP standalone
 run:
 	@echo "🕵️‍♀️ Starting AngelaMCP standalone..."
-	python -m src.main
+	$(PYTHON) -m src.main
 
 # Run as MCP server
 run-mcp:

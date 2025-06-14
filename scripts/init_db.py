@@ -100,10 +100,14 @@ async def verify_database_setup():
         db_manager = DatabaseManager()
         await db_manager.initialize()
 
-        async with db_manager.get_session() as session:
-            result = await session.execute(text("SELECT current_timestamp"))
-            timestamp = result.scalar()
-            logger.info(f"✅ Database verification successful - Current time: {timestamp}")
+        # Test basic database connectivity
+        if db_manager.session_factory:
+            async with db_manager.get_session() as session:
+                result = await session.execute(text("SELECT current_timestamp"))
+                timestamp = result.scalar()
+                logger.info(f"✅ Database verification successful - Current time: {timestamp}")
+        else:
+            logger.error("Session factory not initialized")
 
         await db_manager.close()
 

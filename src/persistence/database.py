@@ -515,7 +515,7 @@ class DatabaseManager:
             expire=settings.session_timeout
         )
     
-    async def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+    async def get_session_data(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get session data."""
         data = await self.redis_get(f"session:{session_id}")
         if data:
