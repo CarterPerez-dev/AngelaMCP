@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
 AngelaMCP MCP Server - JSON-RPC Implementation
-Fixed to work with Claude Code using direct JSON-RPC protocol.
+Fixed logging and argument handling issues for Claude Code integration.
 """
 
 import json
 import sys
 import os
 import asyncio
-import logging
 from typing import Dict, Any, Optional, List
 from pathlib import Path
 
@@ -20,12 +19,6 @@ sys.stderr = os.fdopen(sys.stderr.fileno(), 'w', 1)
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-# Import AngelaMCP components
-from config.settings import settings
-from src.utils.logger import get_logger
-
-logger = get_logger("mcp_server")
-
 # Server version
 __version__ = "1.0.0"
 
@@ -36,39 +29,60 @@ class AngelaMCPServer:
         self.orchestrator: Optional[Any] = None
         self.agents: Dict[str, Any] = {}
         self.db_manager: Optional[Any] = None
+        self.initialized = False
         
     async def initialize_components(self):
         """Initialize AngelaMCP components."""
+        if self.initialized:
+            return True
+            
         try:
             # Import here to avoid circular imports
-            from src.orchestrator import TaskOrchestrator
+            from src.orchestrator.manager import TaskOrchestrator
             from src.persistence.database import DatabaseManager
-            from src.agents import ClaudeCodeAgent, OpenAIAgent, GeminiAgent
+            from src.agents.claude_agent import ClaudeCodeAgent
+            from src.agents.openai_agent import OpenAIAgent  
+            from src.agents.gemini_agent import GeminiAgent
             
             # Initialize database
             self.db_manager = DatabaseManager()
             await self.db_manager.initialize()
             
-            # Initialize agents
-            self.agents = {
-                "claude": ClaudeCodeAgent(),
-                "openai": OpenAIAgent(), 
-                "gemini": GeminiAgent()
-            }
+            # Initialize agents with error handling
+            self.agents = {}
+            
+            try:
+                self.agents["claude"] = ClaudeCodeAgent()
+            except Exception as e:
+                print(f"Claude agent initialization failed: {e}", file=sys.stderr)
+                
+            try:
+                self.agents["openai"] = OpenAIAgent()
+            except Exception as e:
+                print(f"OpenAI agent initialization failed: {e}", file=sys.stderr)
+                
+            try:
+                self.agents["gemini"] = GeminiAgent()
+            except Exception as e:
+                print(f"Gemini agent initialization failed: {e}", file=sys.stderr)
+            
+            # Need at least one agent
+            if not self.agents:
+                raise RuntimeError("No agents initialized successfully")
             
             # Initialize orchestrator
             self.orchestrator = TaskOrchestrator(
-                claude_agent=self.agents["claude"],
-                openai_agent=self.agents["openai"],
-                gemini_agent=self.agents["gemini"],
+                claude_agent=self.agents.get("claude"),
+                openai_agent=self.agents.get("openai"),
+                gemini_agent=self.agents.get("gemini"),
                 db_manager=self.db_manager
             )
             
-            logger.info("AngelaMCP components initialized successfully")
+            self.initialized = True
             return True
             
         except Exception as e:
-            logger.error(f"Failed to initialize AngelaMCP components: {e}")
+            print(f"Component initialization failed: {e}", file=sys.stderr)
             return False
 
     def send_response(self, response: Dict[str, Any]):
@@ -180,8 +194,10 @@ class AngelaMCPServer:
         arguments = params.get("arguments", {})
         
         try:
-            # Use simple string formatting to avoid issues with logger format strings
-            logger.info("Tool called: %s with args: %s", tool_name, arguments)
+            
+            # Ensure components are initialized
+            if not self.initialized:
+                await self.initialize_components()
             
             if tool_name == "collaborate":
                 result = await self._handle_collaborate(arguments)
@@ -208,7 +224,6 @@ class AngelaMCPServer:
             }
             
         except Exception as e:
-            logger.error("Tool %s failed: %s", tool_name, str(e), exc_info=True)
             return {
                 "jsonrpc": "2.0",
                 "id": request_id,
@@ -224,12 +239,15 @@ class AngelaMCPServer:
             task_description = arguments.get("task_description", "")
             strategy = arguments.get("strategy", "auto")
             
+            if not task_description:
+                return "❌ Task description is required for collaboration"
+            
             if not self.orchestrator:
                 return "❌ AngelaMCP orchestrator not initialized"
             
             # Import here to avoid circular imports
-            from src.agents import TaskContext, TaskType
-            from src.orchestrator import CollaborationStrategy
+            from src.agents.base import TaskContext, TaskType
+            from src.orchestrator.manager import CollaborationStrategy
             
             # Create context
             context = TaskContext(
@@ -256,9 +274,10 @@ class AngelaMCPServer:
             )
             
             # Format response
+            strategy_name = result.strategy_used.value if result.strategy_used else 'unknown'
             response_text = f"""**AngelaMCP Collaboration Result**
 
-**Strategy Used:** {result.strategy_used.value if result.strategy_used else 'unknown'}
+**Strategy Used:** {strategy_name}
 **Success:** {result.success}
 **Execution Time:** {result.execution_time:.2f}s
 **Consensus Score:** {result.consensus_score:.2f}
@@ -268,10 +287,10 @@ class AngelaMCPServer:
 """
             
             if result.cost_breakdown:
-                cost_text = "**Cost Breakdown:**\n"
+                cost_text = "\n**Cost Breakdown:**\n"
                 for agent, cost in result.cost_breakdown.items():
                     cost_text += f"- {agent}: ${cost:.4f}\n"
-                response_text += f"\n{cost_text}"
+                response_text += cost_text
             
             if result.debate_summary:
                 response_text += f"\n**Debate Summary:**\n{result.debate_summary}"
@@ -279,7 +298,6 @@ class AngelaMCPServer:
             return response_text
             
         except Exception as e:
-            logger.error("Collaboration failed: %s", str(e))
             return f"❌ Collaboration failed: {str(e)}"
 
     async def _handle_debate(self, arguments: Dict[str, Any]) -> str:
@@ -287,11 +305,14 @@ class AngelaMCPServer:
         try:
             topic = arguments.get("topic", "")
             
+            if not topic:
+                return "❌ Topic is required for debate"
+            
             if not self.orchestrator:
                 return "❌ AngelaMCP orchestrator not initialized"
             
             # Import here to avoid circular imports
-            from src.agents import TaskContext, TaskType
+            from src.agents.base import TaskContext, TaskType
             
             # Create context
             context = TaskContext(
@@ -318,23 +339,25 @@ class AngelaMCPServer:
 """
                 
                 if result.participant_votes:
-                    vote_text = "**Final Votes:**\n"
+                    vote_text = "\n**Final Votes:**\n"
                     for agent, vote_info in result.participant_votes.items():
                         vote_text += f"- {agent}: {vote_info}\n"
-                    response_text += f"\n{vote_text}"
+                    response_text += vote_text
             else:
                 response_text = f"❌ Debate failed: {result.error_message or 'Unknown error'}"
             
             return response_text
             
         except Exception as e:
-            logger.error("Debate failed: %s", str(e))
             return f"❌ Debate failed: {str(e)}"
 
     async def _handle_analyze_task_complexity(self, arguments: Dict[str, Any]) -> str:
         """Handle task complexity analysis requests."""
         try:
             task_description = arguments.get("task_description", "")
+            
+            if not task_description:
+                return "❌ Task description is required for analysis"
             
             if not self.orchestrator:
                 # Provide basic analysis without orchestrator
@@ -348,8 +371,8 @@ class AngelaMCPServer:
 """
             
             # Import here to avoid circular imports
-            from src.agents import TaskContext, TaskType
-            from src.orchestrator import CollaborationStrategy
+            from src.agents.base import TaskContext, TaskType
+            from src.orchestrator.manager import CollaborationStrategy
             
             # Create context for analysis
             context = TaskContext(task_type=TaskType.ANALYSIS)
@@ -374,6 +397,8 @@ class AngelaMCPServer:
             if any(word in task_lower for word in ["compare", "analyze", "evaluate", "debate"]):
                 complexity_indicators.append("Requires multiple perspectives")
             
+            indicators_text = "\n".join(f"- {indicator}" for indicator in complexity_indicators) if complexity_indicators else "- Standard complexity task"
+            
             response_text = f"""**AngelaMCP Task Analysis**
 
 **Task:** {task_description}
@@ -381,7 +406,7 @@ class AngelaMCPServer:
 **Recommended Strategy:** {strategy.value}
 
 **Complexity Indicators:**
-{chr(10).join(f"- {indicator}" for indicator in complexity_indicators) if complexity_indicators else "- Standard complexity task"}
+{indicators_text}
 
 **Strategy Explanation:**
 """
@@ -399,13 +424,17 @@ class AngelaMCPServer:
             return response_text
             
         except Exception as e:
-            logger.error("Task analysis failed: %s", str(e))  
             return f"❌ Task analysis failed: {str(e)}"
 
     async def _handle_get_agent_status(self, arguments: Dict[str, Any]) -> str:
         """Handle agent status requests."""
         try:
-            logger.info("Agent status request")
+            
+            # Import settings here to avoid circular imports
+            try:
+                from config.settings import settings
+            except Exception:
+                settings = None
             
             # Basic status
             response_text = f"""**AngelaMCP Agent Status**
@@ -423,25 +452,25 @@ class AngelaMCPServer:
             else:
                 response_text += "⚠️ Agents not yet initialized\n"
             
-            response_text += f"""
+            if settings:
+                response_text += f"""
 **Configuration:**
-- OpenAI Model: {settings.openai_model}
-- Gemini Model: {settings.gemini_model}
-- Claude Vote Weight: {settings.claude_vote_weight}
-- Debate Max Rounds: {settings.debate_max_rounds}
-- Cost Tracking: {'Enabled' if settings.enable_cost_tracking else 'Disabled'}
+- OpenAI Model: {getattr(settings, 'openai_model', 'not configured')}
+- Gemini Model: {getattr(settings, 'gemini_model', 'not configured')}
+- Claude Vote Weight: {getattr(settings, 'claude_vote_weight', 'not configured')}
+- Debate Max Rounds: {getattr(settings, 'debate_max_rounds', 'not configured')}
+- Cost Tracking: {'Enabled' if getattr(settings, 'enable_cost_tracking', False) else 'Disabled'}
 """
+            else:
+                response_text += "\n**Configuration:** Not loaded"
             
             return response_text
             
         except Exception as e:
-            logger.error("Agent status check failed: %s", str(e))
             return f"❌ Agent status check failed: {str(e)}"
 
     async def run(self):
         """Main server loop"""
-        # Initialize components
-        await self.initialize_components()
         
         while True:
             try:
@@ -472,7 +501,7 @@ class AngelaMCPServer:
                 
                 self.send_response(response)
                 
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as e:
                 continue
             except EOFError:
                 break
@@ -493,9 +522,8 @@ async def main():
         server = AngelaMCPServer()
         await server.run()
     except KeyboardInterrupt:
-        logger.info("MCP server shutdown requested")
+        pass
     except Exception as e:
-        logger.error(f"MCP server error: {e}", exc_info=True)
         sys.exit(1)
 
 if __name__ == "__main__":

@@ -69,9 +69,9 @@ class TaskOrchestrator:
     
     def __init__(
         self,
-        claude_agent: ClaudeCodeAgent,
-        openai_agent: OpenAIAgent,
-        gemini_agent: GeminiAgent,
+        claude_agent: Optional[ClaudeCodeAgent],
+        openai_agent: Optional[OpenAIAgent],
+        gemini_agent: Optional[GeminiAgent],
         db_manager: DatabaseManager
     ):
         self.claude_agent = claude_agent
@@ -86,12 +86,14 @@ class TaskOrchestrator:
         
         self.logger = get_logger("orchestrator")
         
-        # Agent mapping
-        self.agents = {
-            AgentType.CLAUDE: claude_agent,
-            AgentType.OPENAI: openai_agent,
-            AgentType.GEMINI: gemini_agent
-        }
+        # Agent mapping - only include available agents
+        self.agents = {}
+        if claude_agent:
+            self.agents[AgentType.CLAUDE] = claude_agent
+        if openai_agent:
+            self.agents[AgentType.OPENAI] = openai_agent
+        if gemini_agent:
+            self.agents[AgentType.GEMINI] = gemini_agent
     
     async def execute_task(
         self, 
@@ -163,7 +165,19 @@ class TaskOrchestrator:
         if context is None:
             context = TaskContext(task_type=TaskType.DEBATE)
         
-        agents = [self.claude_agent, self.openai_agent, self.gemini_agent]
+        # Use only available agents
+        agents = [agent for agent in [self.claude_agent, self.openai_agent, self.gemini_agent] if agent is not None]
+        
+        if len(agents) < 2:
+            # Return failed debate result
+            return DebateResult(
+                debate_id=str(uuid.uuid4()),
+                topic=topic,
+                success=False,
+                error_message="Need at least 2 agents for debate",
+                participating_agents=[agent.name for agent in agents] if agents else []
+            )
+        
         return await self.debate_protocol.conduct_debate(topic, agents, context)
     
     async def _select_strategy(
@@ -204,16 +218,22 @@ class TaskOrchestrator:
         """Execute task with the best single agent (usually Claude)."""
         
         try:
-            # Use Claude as primary agent
-            response = await self.claude_agent.generate(task_description, context)
+            # Use Claude as primary agent, fallback to others if needed
+            agent = self.claude_agent or self.openai_agent or self.gemini_agent
+            agent_name = "claude" if self.claude_agent else ("openai" if self.openai_agent else "gemini")
+            
+            if not agent:
+                raise OrchestrationError("No agents available for execution")
+            
+            response = await agent.generate(task_description, context)
             
             return CollaborationResult(
                 success=response.success if hasattr(response, 'success') else True,
                 final_solution=response.content,
                 agent_responses=[{
-                    "agent": "claude",
+                    "agent": agent_name,
                     "response": response.content,
-                    "metadata": response.metadata
+                    "metadata": getattr(response, 'metadata', {})
                 }],
                 cost_breakdown=self._calculate_costs([response])
             )
@@ -234,25 +254,34 @@ class TaskOrchestrator:
         """Execute task with all agents in parallel."""
         
         try:
-            # Run all agents in parallel
-            tasks = [
-                self.claude_agent.generate(task_description, context),
-                self.openai_agent.generate(task_description, context),
-                self.gemini_agent.generate(task_description, context)
-            ]
+            # Run available agents in parallel
+            tasks = []
+            agent_names = []
+            
+            if self.claude_agent:
+                tasks.append(self.claude_agent.generate(task_description, context))
+                agent_names.append("claude")
+            if self.openai_agent:
+                tasks.append(self.openai_agent.generate(task_description, context))
+                agent_names.append("openai")
+            if self.gemini_agent:
+                tasks.append(self.gemini_agent.generate(task_description, context))
+                agent_names.append("gemini")
+            
+            if not tasks:
+                raise OrchestrationError("No agents available for parallel execution")
             
             responses = await asyncio.gather(*tasks, return_exceptions=True)
             
             # Filter successful responses
             successful_responses = []
-            agent_names = ["claude", "openai", "gemini"]
             
             for i, response in enumerate(responses):
                 if not isinstance(response, Exception):
                     successful_responses.append({
                         "agent": agent_names[i],
                         "response": response.content,
-                        "metadata": response.metadata
+                        "metadata": getattr(response, 'metadata', {})
                     })
             
             if not successful_responses:
@@ -287,7 +316,12 @@ class TaskOrchestrator:
         """Execute task through structured debate."""
         
         try:
-            agents = [self.claude_agent, self.openai_agent, self.gemini_agent]
+            # Use only available agents for debate
+            agents = [agent for agent in [self.claude_agent, self.openai_agent, self.gemini_agent] if agent is not None]
+            
+            if len(agents) < 2:
+                raise OrchestrationError("Need at least 2 agents for debate")
+            
             debate_result = await self.debate_protocol.conduct_debate(
                 task_description, agents, context
             )
@@ -341,8 +375,11 @@ class TaskOrchestrator:
         """Execute task requiring consensus from all agents."""
         
         try:
-            # Get initial responses from all agents
-            agents = [self.claude_agent, self.openai_agent, self.gemini_agent]
+            # Get initial responses from available agents
+            agents = [agent for agent in [self.claude_agent, self.openai_agent, self.gemini_agent] if agent is not None]
+            
+            if not agents:
+                raise OrchestrationError("No agents available for consensus")
             
             responses = []
             for agent in agents:
