@@ -181,9 +181,6 @@ def setup_logging() -> None:
             "{time:YYYY-MM-DD HH:mm:ss.SSS} | "
             "{level: <8} | "
             "{name}:{function}:{line} | "
-            "req_id:{extra[request_id]} | "
-            "session_id:{extra[session_id]} | "
-            "agent:{extra[agent_name]} | "
             "{message}"
         )
         
@@ -229,11 +226,11 @@ class InterceptHandler(logging.Handler):
             frame = frame.f_back
             depth += 1
         
-        # Add context information
+        # Add context information with defaults
         extra = {
-            "request_id": request_id_var.get(),
-            "session_id": session_id_var.get(),
-            "agent_name": agent_name_var.get()
+            "request_id": request_id_var.get() or "unknown",
+            "session_id": session_id_var.get() or "unknown", 
+            "agent_name": agent_name_var.get() or "unknown"
         }
         
         loguru_logger.opt(depth=depth, exception=record.exc_info).log(
@@ -251,9 +248,9 @@ def get_logger(name: str) -> logging.Logger:
     def log_with_context(level: int, msg: str, **context):
         """Log message with additional context."""
         extra = {
-            "request_id": request_id_var.get(),
-            "session_id": session_id_var.get(),
-            "agent_name": agent_name_var.get(),
+            "request_id": request_id_var.get() or "unknown",
+            "session_id": session_id_var.get() or "unknown",
+            "agent_name": agent_name_var.get() or "unknown",
             **context
         }
         logger.log(level, msg, extra=extra)

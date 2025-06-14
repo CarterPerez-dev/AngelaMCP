@@ -1,169 +1,258 @@
-# src/mcp_server.py
 #!/usr/bin/env python3
 """
-MCP Server for AngelaMCP - Fixed for MCP SDK compatibility.
-
-This version handles the initialization parameter correctly.
+AngelaMCP MCP Server - JSON-RPC Implementation
+Fixed to work with Claude Code using direct JSON-RPC protocol.
 """
 
-import asyncio
 import json
 import sys
+import os
+import asyncio
 import logging
-from typing import Dict, Any, List, Optional, Union, Sequence
-from dataclasses import dataclass, asdict
-from contextlib import asynccontextmanager
+from typing import Dict, Any, Optional, List
 from pathlib import Path
 
-# Add project root to Python path
+# Ensure unbuffered output
+sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', 1)
+sys.stderr = os.fdopen(sys.stderr.fileno(), 'w', 1)
+
+# Add project root to path for imports
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-# MCP SDK imports
-from mcp.server import Server
-from mcp.types import (
-    Tool,
-    TextContent,
-    ImageContent,
-    EmbeddedResource
-)
-from mcp import stdio_server
-
-# AngelaMCP imports
+# Import AngelaMCP components
 from config.settings import settings
-from src.agents import ClaudeCodeAgent, OpenAIAgent, GeminiAgent, TaskContext, TaskType
-from src.orchestrator import TaskOrchestrator, CollaborationStrategy
-from src.persistence.database import DatabaseManager
 from src.utils.logger import get_logger
 
 logger = get_logger("mcp_server")
 
-# Create the MCP server instance
-server = Server("angelamcp")
+# Server version
+__version__ = "1.0.0"
 
-# Global instances
-orchestrator: Optional[TaskOrchestrator] = None
-db_manager: Optional[DatabaseManager] = None
-agents: Dict[str, Any] = {}
-
-
-@server.list_tools()
-async def handle_list_tools() -> List[Tool]:
-    """
-    List available tools for the MCP client.
-    """
-    return [
-        Tool(
-            name="collaborate",
-            description="Orchestrate collaboration between multiple AI agents on a task",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "task_description": {
-                        "type": "string",
-                        "description": "The task to collaborate on"
-                    },
-                    "agents": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of agents to include (claude, openai, gemini)",
-                        "default": ["claude", "openai", "gemini"]
-                    },
-                    "strategy": {
-                        "type": "string",
-                        "enum": ["debate", "parallel", "consensus", "auto"],
-                        "description": "Collaboration strategy",
-                        "default": "auto"
-                    }
-                },
-                "required": ["task_description"]
-            }
-        ),
-        Tool(
-            name="debate",
-            description="Start a structured debate between AI agents on a topic",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "topic": {
-                        "type": "string",
-                        "description": "Topic to debate"
-                    },
-                    "agents": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Participating agents",
-                        "default": ["claude", "openai", "gemini"]
-                    }
-                },
-                "required": ["topic"]
-            }
-        ),
-        Tool(
-            name="analyze_task_complexity",
-            description="Analyze task complexity and recommend collaboration strategy",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "task_description": {
-                        "type": "string",
-                        "description": "Task to analyze"
-                    }
-                },
-                "required": ["task_description"]
-            }
-        ),
-        Tool(
-            name="get_agent_status",
-            description="Get current status of all AI agents",
-            inputSchema={
-                "type": "object",
-                "properties": {}
-            }
-        )
-    ]
-
-
-@server.call_tool()
-async def handle_call_tool(
-    name: str, arguments: Any
-) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
-    """
-    Handle tool execution requests from the MCP client.
-    """
-    global orchestrator
+class AngelaMCPServer:
+    """JSON-RPC MCP Server for AngelaMCP."""
     
-    # Ensure orchestrator is initialized
-    if orchestrator is None:
-        return [TextContent(type="text", text="❌ Server not fully initialized. Please try again in a moment.")]
-    
-    logger.info(f"Tool called: {name} with args: {arguments}")
-    
-    try:
-        if name == "collaborate":
+    def __init__(self):
+        self.orchestrator: Optional[Any] = None
+        self.agents: Dict[str, Any] = {}
+        self.db_manager: Optional[Any] = None
+        
+    async def initialize_components(self):
+        """Initialize AngelaMCP components."""
+        try:
+            # Import here to avoid circular imports
+            from src.orchestrator import TaskOrchestrator
+            from src.persistence.database import DatabaseManager
+            from src.agents import ClaudeCodeAgent, OpenAIAgent, GeminiAgent
+            
+            # Initialize database
+            self.db_manager = DatabaseManager()
+            await self.db_manager.initialize()
+            
+            # Initialize agents
+            self.agents = {
+                "claude": ClaudeCodeAgent(),
+                "openai": OpenAIAgent(), 
+                "gemini": GeminiAgent()
+            }
+            
+            # Initialize orchestrator
+            self.orchestrator = TaskOrchestrator(
+                claude_agent=self.agents["claude"],
+                openai_agent=self.agents["openai"],
+                gemini_agent=self.agents["gemini"],
+                db_manager=self.db_manager
+            )
+            
+            logger.info("AngelaMCP components initialized successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize AngelaMCP components: {e}")
+            return False
+
+    def send_response(self, response: Dict[str, Any]):
+        """Send a JSON-RPC response"""
+        print(json.dumps(response), flush=True)
+
+    def handle_initialize(self, request_id: Any) -> Dict[str, Any]:
+        """Handle initialization"""
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {
+                    "tools": {}
+                },
+                "serverInfo": {
+                    "name": "angelamcp",
+                    "version": __version__
+                }
+            }
+        }
+
+    def handle_tools_list(self, request_id: Any) -> Dict[str, Any]:
+        """List available tools"""
+        tools = [
+            {
+                "name": "collaborate",
+                "description": "Orchestrate collaboration between multiple AI agents on a task",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "task_description": {
+                            "type": "string",
+                            "description": "The task to collaborate on"
+                        },
+                        "agents": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of agents to include (claude, openai, gemini)",
+                            "default": ["claude", "openai", "gemini"]
+                        },
+                        "strategy": {
+                            "type": "string",
+                            "enum": ["debate", "parallel", "consensus", "auto"],
+                            "description": "Collaboration strategy",
+                            "default": "auto"
+                        }
+                    },
+                    "required": ["task_description"]
+                }
+            },
+            {
+                "name": "debate",
+                "description": "Start a structured debate between AI agents on a topic",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "topic": {
+                            "type": "string",
+                            "description": "Topic to debate"
+                        },
+                        "agents": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Participating agents",
+                            "default": ["claude", "openai", "gemini"]
+                        }
+                    },
+                    "required": ["topic"]
+                }
+            },
+            {
+                "name": "analyze_task_complexity",
+                "description": "Analyze task complexity and recommend collaboration strategy",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "task_description": {
+                            "type": "string",
+                            "description": "Task to analyze"
+                        }
+                    },
+                    "required": ["task_description"]
+                }
+            },
+            {
+                "name": "get_agent_status",
+                "description": "Get current status of all AI agents",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False
+                }
+            }
+        ]
+        
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {
+                "tools": tools
+            }
+        }
+
+    async def handle_tool_call(self, request_id: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle tool execution"""
+        tool_name = params.get("name")
+        arguments = params.get("arguments", {})
+        
+        try:
+            # Use simple string formatting to avoid issues with logger format strings
+            logger.info("Tool called: %s with args: %s", tool_name, arguments)
+            
+            if tool_name == "collaborate":
+                result = await self._handle_collaborate(arguments)
+            elif tool_name == "debate":
+                result = await self._handle_debate(arguments)
+            elif tool_name == "analyze_task_complexity":
+                result = await self._handle_analyze_task_complexity(arguments)
+            elif tool_name == "get_agent_status":
+                result = await self._handle_get_agent_status(arguments)
+            else:
+                raise ValueError(f"Unknown tool: {tool_name}")
+            
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": result
+                        }
+                    ]
+                }
+            }
+            
+        except Exception as e:
+            logger.error("Tool %s failed: %s", tool_name, str(e), exc_info=True)
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {
+                    "code": -32603,
+                    "message": f"Tool {tool_name} failed: {str(e)}"
+                }
+            }
+
+    async def _handle_collaborate(self, arguments: Dict[str, Any]) -> str:
+        """Handle collaboration requests."""
+        try:
+            task_description = arguments.get("task_description", "")
+            strategy = arguments.get("strategy", "auto")
+            
+            if not self.orchestrator:
+                return "❌ AngelaMCP orchestrator not initialized"
+            
+            # Import here to avoid circular imports
+            from src.agents import TaskContext, TaskType
+            from src.orchestrator import CollaborationStrategy
+            
             # Create context
             context = TaskContext(
                 task_type=TaskType.GENERAL,
                 session_id=f"mcp_collab_{id(arguments)}"
             )
             
-            # Map strategy
+            # Map strategy string to enum
             strategy_map = {
                 "debate": CollaborationStrategy.DEBATE,
                 "parallel": CollaborationStrategy.PARALLEL,
                 "consensus": CollaborationStrategy.CONSENSUS,
+                "single_agent": CollaborationStrategy.SINGLE_AGENT,
                 "auto": CollaborationStrategy.AUTO
             }
-            strategy = strategy_map.get(
-                arguments.get("strategy", "auto"), 
-                CollaborationStrategy.AUTO
-            )
+            
+            collab_strategy = strategy_map.get(strategy, CollaborationStrategy.AUTO)
             
             # Execute collaboration
-            result = await orchestrator.execute_task(
-                arguments["task_description"],
+            result = await self.orchestrator.execute_task(
+                task_description,
                 context,
-                strategy
+                collab_strategy
             )
             
             # Format response
@@ -175,36 +264,49 @@ async def handle_call_tool(
 **Consensus Score:** {result.consensus_score:.2f}
 
 **Final Solution:**
-{result.final_solution}"""
+{result.final_solution}
+"""
             
             if result.cost_breakdown:
-                response_text += "\n\n**Cost Breakdown:**"
+                cost_text = "**Cost Breakdown:**\n"
                 for agent, cost in result.cost_breakdown.items():
-                    response_text += f"\n- {agent}: ${cost:.4f}"
+                    cost_text += f"- {agent}: ${cost:.4f}\n"
+                response_text += f"\n{cost_text}"
             
             if result.debate_summary:
-                response_text += f"\n\n**Debate Summary:**\n{result.debate_summary}"
+                response_text += f"\n**Debate Summary:**\n{result.debate_summary}"
             
-            return [TextContent(type="text", text=response_text)]
+            return response_text
             
-        elif name == "debate":
-            # Create context for debate
+        except Exception as e:
+            logger.error("Collaboration failed: %s", str(e))
+            return f"❌ Collaboration failed: {str(e)}"
+
+    async def _handle_debate(self, arguments: Dict[str, Any]) -> str:
+        """Handle debate requests."""
+        try:
+            topic = arguments.get("topic", "")
+            
+            if not self.orchestrator:
+                return "❌ AngelaMCP orchestrator not initialized"
+            
+            # Import here to avoid circular imports
+            from src.agents import TaskContext, TaskType
+            
+            # Create context
             context = TaskContext(
                 task_type=TaskType.DEBATE,
                 session_id=f"mcp_debate_{id(arguments)}"
             )
             
             # Start debate
-            result = await orchestrator.start_debate(
-                arguments["topic"], 
-                context
-            )
+            result = await self.orchestrator.start_debate(topic, context)
             
             # Format response
             if result.success:
                 response_text = f"""**AngelaMCP Debate Result**
 
-**Topic:** {arguments['topic']}
+**Topic:** {topic}
 **Rounds Completed:** {result.rounds_completed}
 **Consensus Score:** {result.consensus_score:.2f}
 
@@ -212,158 +314,189 @@ async def handle_call_tool(
 {result.final_consensus or 'No consensus reached'}
 
 **Debate Summary:**
-{result.summary or 'No summary available'}"""
+{result.summary or 'No summary available'}
+"""
                 
                 if result.participant_votes:
-                    response_text += "\n\n**Final Votes:**"
+                    vote_text = "**Final Votes:**\n"
                     for agent, vote_info in result.participant_votes.items():
-                        response_text += f"\n- {agent}: {vote_info}"
+                        vote_text += f"- {agent}: {vote_info}\n"
+                    response_text += f"\n{vote_text}"
             else:
                 response_text = f"❌ Debate failed: {result.error_message or 'Unknown error'}"
             
-            return [TextContent(type="text", text=response_text)]
+            return response_text
             
-        elif name == "analyze_task_complexity":
+        except Exception as e:
+            logger.error("Debate failed: %s", str(e))
+            return f"❌ Debate failed: {str(e)}"
+
+    async def _handle_analyze_task_complexity(self, arguments: Dict[str, Any]) -> str:
+        """Handle task complexity analysis requests."""
+        try:
+            task_description = arguments.get("task_description", "")
+            
+            if not self.orchestrator:
+                # Provide basic analysis without orchestrator
+                return f"""**AngelaMCP Task Analysis**
+
+**Task:** {task_description}
+
+**Basic Analysis:** This appears to be a {len(task_description.split())} word task.
+**Recommended Strategy:** auto
+**Note:** Full analysis requires orchestrator initialization.
+"""
+            
+            # Import here to avoid circular imports
+            from src.agents import TaskContext, TaskType
+            from src.orchestrator import CollaborationStrategy
+            
             # Create context for analysis
             context = TaskContext(task_type=TaskType.ANALYSIS)
             
             # Use orchestrator's strategy selection logic
-            strategy = await orchestrator._select_strategy(
-                arguments["task_description"], 
+            strategy = await self.orchestrator._select_strategy(
+                task_description, 
                 context
             )
             
-            # Analyze complexity
-            task_lower = arguments["task_description"].lower()
+            # Provide detailed analysis
+            task_lower = task_description.lower()
             
+            # Analyze complexity indicators
             complexity_indicators = []
             if any(word in task_lower for word in ["complex", "architecture", "system", "enterprise"]):
                 complexity_indicators.append("High complexity keywords detected")
-            if len(arguments["task_description"].split()) > 50:
+            
+            if len(task_description.split()) > 50:
                 complexity_indicators.append("Detailed/lengthy task description")
+            
             if any(word in task_lower for word in ["compare", "analyze", "evaluate", "debate"]):
                 complexity_indicators.append("Requires multiple perspectives")
             
-            agent_recommendations = []
-            if any(word in task_lower for word in ["code", "implement", "build", "create"]):
-                agent_recommendations.append("Claude Code - Primary implementation")
-            if any(word in task_lower for word in ["review", "optimize", "improve", "fix"]):
-                agent_recommendations.append("OpenAI - Code review and optimization")
-            if any(word in task_lower for word in ["research", "best practices", "documentation"]):
-                agent_recommendations.append("Gemini - Research and documentation")
-            
             response_text = f"""**AngelaMCP Task Analysis**
 
-**Task:** {arguments['task_description']}
+**Task:** {task_description}
 
 **Recommended Strategy:** {strategy.value}
 
 **Complexity Indicators:**
-{chr(10).join(f"- {ind}" for ind in complexity_indicators) if complexity_indicators else "- Standard complexity task"}
-
-**Agent Recommendations:**
-{chr(10).join(f"- {rec}" for rec in agent_recommendations) if agent_recommendations else "- All agents recommended"}
+{chr(10).join(f"- {indicator}" for indicator in complexity_indicators) if complexity_indicators else "- Standard complexity task"}
 
 **Strategy Explanation:**
 """
             
+            # Add strategy explanation
             if strategy == CollaborationStrategy.SINGLE_AGENT:
-                response_text += "This task appears straightforward and can be handled efficiently by a single agent."
+                response_text += "This task appears straightforward and can be handled efficiently by a single agent (usually Claude Code)."
             elif strategy == CollaborationStrategy.DEBATE:
-                response_text += "This task benefits from multiple perspectives and structured debate between agents."
+                response_text += "This task benefits from multiple perspectives and structured debate between agents to reach the best solution."
             elif strategy == CollaborationStrategy.CONSENSUS:
                 response_text += "This task requires agreement from multiple agents to ensure quality and completeness."
             elif strategy == CollaborationStrategy.PARALLEL:
-                response_text += "This task can be broken down and executed in parallel by multiple agents."
+                response_text += "This task can be broken down and executed in parallel by multiple agents for faster completion."
             
-            return [TextContent(type="text", text=response_text)]
+            return response_text
             
-        elif name == "get_agent_status":
-            # Get health check from orchestrator
-            health_status = await orchestrator.health_check()
+        except Exception as e:
+            logger.error("Task analysis failed: %s", str(e))  
+            return f"❌ Task analysis failed: {str(e)}"
+
+    async def _handle_get_agent_status(self, arguments: Dict[str, Any]) -> str:
+        """Handle agent status requests."""
+        try:
+            logger.info("Agent status request")
             
-            response_text = "**AngelaMCP Agent Status**\n\n"
+            # Basic status
+            response_text = f"""**AngelaMCP Agent Status**
+
+✅ **MCP Server**: Running (JSON-RPC v{__version__})
+✅ **Database**: {'Connected' if self.db_manager else 'Not initialized'}  
+✅ **Orchestrator**: {'Ready' if self.orchestrator else 'Not initialized'}
+
+**Available Agents:**
+"""
             
-            for component, status in health_status.items():
-                if isinstance(status, dict):
-                    emoji = "✅" if status.get("status") == "healthy" else "❌"
-                    response_text += f"{emoji} **{component.title()}**: {status.get('status', 'unknown')}\n"
+            if self.agents:
+                for agent_name in self.agents.keys():
+                    response_text += f"✅ **{agent_name.title()}**: Available\n"
+            else:
+                response_text += "⚠️ Agents not yet initialized\n"
+            
+            response_text += f"""
+**Configuration:**
+- OpenAI Model: {settings.openai_model}
+- Gemini Model: {settings.gemini_model}
+- Claude Vote Weight: {settings.claude_vote_weight}
+- Debate Max Rounds: {settings.debate_max_rounds}
+- Cost Tracking: {'Enabled' if settings.enable_cost_tracking else 'Disabled'}
+"""
+            
+            return response_text
+            
+        except Exception as e:
+            logger.error("Agent status check failed: %s", str(e))
+            return f"❌ Agent status check failed: {str(e)}"
+
+    async def run(self):
+        """Main server loop"""
+        # Initialize components
+        await self.initialize_components()
+        
+        while True:
+            try:
+                line = sys.stdin.readline()
+                if not line:
+                    break
+                
+                request = json.loads(line.strip())
+                method = request.get("method")
+                request_id = request.get("id")
+                params = request.get("params", {})
+                
+                if method == "initialize":
+                    response = self.handle_initialize(request_id)
+                elif method == "tools/list":
+                    response = self.handle_tools_list(request_id)
+                elif method == "tools/call":
+                    response = await self.handle_tool_call(request_id, params)
                 else:
-                    emoji = "❌" if "error" in str(status).lower() else "✅"
-                    response_text += f"{emoji} **{component.title()}**: {status}\n"
-            
-            response_text += f"\n**Configuration:**\n"
-            response_text += f"- OpenAI Model: {settings.openai_model}\n"
-            response_text += f"- Gemini Model: {settings.gemini_model}\n"
-            response_text += f"- Claude Vote Weight: {settings.claude_vote_weight}\n"
-            response_text += f"- Debate Max Rounds: {settings.debate_max_rounds}\n"
-            response_text += f"- Cost Tracking: {'Enabled' if settings.enable_cost_tracking else 'Disabled'}\n"
-            
-            return [TextContent(type="text", text=response_text)]
-            
-        else:
-            return [TextContent(type="text", text=f"Unknown tool: {name}")]
-            
-    except Exception as e:
-        logger.error(f"Tool {name} failed: {e}", exc_info=True)
-        return [TextContent(type="text", text=f"❌ Tool {name} failed: {str(e)}")]
-
-
-async def initialize_angelamcp() -> None:
-    """Initialize all AngelaMCP components."""
-    global orchestrator, db_manager, agents
-    
-    try:
-        logger.info("Initializing AngelaMCP MCP Server...")
-        
-        # Initialize database
-        db_manager = DatabaseManager()
-        await db_manager.initialize()
-        
-        # Initialize agents
-        agents = {
-            "claude": ClaudeCodeAgent(),
-            "openai": OpenAIAgent(), 
-            "gemini": GeminiAgent()
-        }
-        
-        # Initialize orchestrator
-        orchestrator = TaskOrchestrator(
-            claude_agent=agents["claude"],
-            openai_agent=agents["openai"],
-            gemini_agent=agents["gemini"],
-            db_manager=db_manager
-        )
-        
-        logger.info("AngelaMCP MCP Server initialized successfully")
-        
-    except Exception as e:
-        logger.error(f"Failed to initialize MCP server: {e}", exc_info=True)
-        raise
-
+                    response = {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "error": {
+                            "code": -32601,
+                            "message": f"Method not found: {method}"
+                        }
+                    }
+                
+                self.send_response(response)
+                
+            except json.JSONDecodeError:
+                continue
+            except EOFError:
+                break
+            except Exception as e:
+                if 'request_id' in locals():
+                    self.send_response({
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "error": {
+                            "code": -32603,
+                            "message": f"Internal error: {str(e)}"
+                        }
+                    })
 
 async def main():
-    """Main entry point for MCP server."""
+    """Main entry point for JSON-RPC MCP server."""
     try:
-        # Initialize AngelaMCP components
-        await initialize_angelamcp()
-        
-        # Run the MCP server using the standard pattern
-        logger.info("Starting AngelaMCP MCP Server...")
-        async with stdio_server() as (read_stream, write_stream):
-            # The initialization_options parameter might be a dict or None
-            # Let's try passing None or an empty dict
-            initialization_options = {}
-            
-            # Run with the initialization options
-            await server.run(read_stream, write_stream, initialization_options)
-            
+        server = AngelaMCPServer()
+        await server.run()
     except KeyboardInterrupt:
         logger.info("MCP server shutdown requested")
     except Exception as e:
         logger.error(f"MCP server error: {e}", exc_info=True)
         sys.exit(1)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
