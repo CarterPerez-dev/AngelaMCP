@@ -1,0 +1,50 @@
+#!/bin/bash
+# 🚀 AngelaMCP Ultra-Quick Setup
+# One command to go from bare Linux to fully working AngelaMCP
+
+set -e
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+echo -e "${CYAN}${BOLD}🚀 AngelaMCP Ultra-Quick Setup${NC}"
+echo -e "${CYAN}===============================${NC}"
+echo ""
+echo -e "${BLUE}Going from bare Linux to fully working AngelaMCP...${NC}"
+echo ""
+
+# Check if we should run the interactive installer
+if [[ "$1" == "--interactive" ]] || [[ ! -f ".env" ]]; then
+    echo -e "${YELLOW}🎯 Running interactive configuration...${NC}"
+    python3 install.py
+else
+    echo -e "${GREEN}✅ Found existing .env, using current configuration${NC}"
+    echo -e "${BLUE}🛠️  Running full setup with existing config...${NC}"
+    
+    # Run the complete setup silently
+    make install
+    make docker-up 2>/dev/null || make deps
+    make db-setup
+    make mcp-clean-register 2>/dev/null || echo "MCP registration skipped (Claude Code not found)"
+    make verify
+fi
+
+echo ""
+echo -e "${GREEN}${BOLD}🎉 AngelaMCP is ready!${NC}"
+echo ""
+echo -e "${CYAN}Quick commands:${NC}"
+echo -e "  ${YELLOW}make run${NC}          # Start AngelaMCP standalone"
+echo -e "  ${YELLOW}make run-mcp${NC}      # Start MCP server for Claude Code"
+echo -e "  ${YELLOW}make status${NC}       # Check system status"
+echo -e "  ${YELLOW}make help${NC}         # See all commands"
+echo ""
+echo -e "${CYAN}Connect with Claude Code:${NC}"
+echo -e "  ${YELLOW}claude \"Use AngelaMCP to help with this task\"${NC}"
+echo ""
+echo -e "${GREEN}${BOLD}🤖 Happy collaborating!${NC}"

@@ -1,0 +1,90 @@
+#!/bin/bash
+# 🚀 AngelaMCP Global Installer
+# This script can be run from anywhere to install AngelaMCP
+# 
+# Usage:
+#   curl -sSL https://raw.githubusercontent.com/your-repo/AngelaMCP/main/install-angelamcp | bash
+#   or
+#   wget -qO- https://raw.githubusercontent.com/your-repo/AngelaMCP/main/install-angelamcp | bash
+
+set -e
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+# Configuration
+REPO_URL="https://github.com/YOUR_USERNAME/AngelaMCP.git"  # Update this
+INSTALL_DIR="$HOME/AngelaMCP"
+
+echo -e "${CYAN}🚀 AngelaMCP Global Installer${NC}"
+echo -e "${CYAN}===============================${NC}"
+echo ""
+
+# Check if directory exists
+if [[ -d "$INSTALL_DIR" ]]; then
+    echo -e "${YELLOW}⚠️  AngelaMCP directory already exists at $INSTALL_DIR${NC}"
+    read -p "Remove and reinstall? [y/N]: " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        rm -rf "$INSTALL_DIR"
+    else
+        echo -e "${RED}❌ Installation cancelled${NC}"
+        exit 1
+    fi
+fi
+
+# Check prerequisites
+echo -e "${BLUE}🔍 Checking prerequisites...${NC}"
+
+# Check Python
+if ! command -v python3 &> /dev/null; then
+    echo -e "${RED}❌ Python 3 is required${NC}"
+    exit 1
+fi
+
+# Check Git
+if ! command -v git &> /dev/null; then
+    echo -e "${YELLOW}📦 Installing Git...${NC}"
+    if command -v apt &> /dev/null; then
+        sudo apt update && sudo apt install -y git
+    elif command -v yum &> /dev/null; then
+        sudo yum install -y git
+    else
+        echo -e "${RED}❌ Please install Git manually${NC}"
+        exit 1
+    fi
+fi
+
+# Check Docker
+if ! command -v docker &> /dev/null; then
+    echo -e "${YELLOW}🐳 Docker not found. AngelaMCP can install it for you.${NC}"
+fi
+
+echo -e "${GREEN}✅ Prerequisites checked${NC}"
+
+# Clone repository
+echo -e "${BLUE}📥 Cloning AngelaMCP...${NC}"
+git clone "$REPO_URL" "$INSTALL_DIR"
+cd "$INSTALL_DIR"
+
+# Run setup
+echo -e "${BLUE}🛠️  Running setup...${NC}"
+chmod +x setup install.py
+make setup
+
+echo -e "${GREEN}🎉 AngelaMCP installed successfully!${NC}"
+echo ""
+echo -e "${CYAN}Next steps:${NC}"
+echo -e "1. ${YELLOW}cd $INSTALL_DIR${NC}"
+echo -e "2. ${YELLOW}make run${NC}           # Start AngelaMCP"
+echo -e "3. ${YELLOW}make run-mcp${NC}       # Start MCP server"
+echo ""
+echo -e "${CYAN}Connect with Claude Code:${NC}"
+echo -e "${YELLOW}claude \"Use AngelaMCP to help with a task\"${NC}"
+echo ""
+echo -e "${GREEN}Happy collaborating! 🤖✨${NC}"

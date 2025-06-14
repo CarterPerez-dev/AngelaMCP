@@ -17,11 +17,16 @@ help:
 	@echo "👻 AngelaMCP - Multi-AI Agent Collaboration Platform"
 	@echo "=================================================="
 	@echo ""
-	@echo "Setup Commands:"
-	@echo "  make setup        - Complete setup (recommended for first time)"
+	@echo "🚀 Quick Start:"
+	@echo "  ./setup           - ONE command setup (RECOMMENDED)"
+	@echo "  make setup        - Same as above"
+	@echo "  make docker-mode  - Docker-only databases"
+	@echo ""
+	@echo "📋 Manual Setup Commands:"
+	@echo "  make setup-manual - Manual step-by-step setup"
 	@echo "  make install      - Install Python dependencies only"
-	@echo "  make deps         - Install system dependencies (PostgreSQL, Redis)"
-	@echo "  make db-setup     - Setup database (create DB, tables, verify)"
+	@echo "  make deps         - Install system dependencies"
+	@echo "  make db-setup     - Setup database"
 	@echo "  make verify       - Verify entire setup is working"
 	@echo ""
 	@echo "Development Commands:"
@@ -32,8 +37,9 @@ help:
 	@echo "  make format       - Format code with ruff"
 	@echo ""
 	@echo "MCP Commands:"
-	@echo "  make mcp-register - Register with Claude Code"
-	@echo "  make mcp-test     - Test MCP integration"
+	@echo "  make mcp-register       - Register with Claude Code"
+	@echo "  make mcp-clean-register - Remove old servers + register fresh"
+	@echo "  make mcp-test           - Test MCP integration"
 	@echo ""
 	@echo "Docker Commands:"
 	@echo "  make docker-build - Build Docker containers"
@@ -44,9 +50,14 @@ help:
 	@echo "  make clean        - Clean temporary files"
 	@echo "  make reset        - Reset database and logs"
 
-# Complete setup for new installations
-setup: deps install env-setup db-setup verify
-	@echo "✅ Complete setup finished!"
+# Interactive one-click setup
+setup:
+	@echo "🚀 Starting AngelaMCP interactive setup..."
+	@bash setup
+
+# Complete setup for new installations (manual mode)
+setup-manual: deps install env-setup db-setup verify
+	@echo "✅ Manual setup finished!"
 	@echo ""
 	@echo "Next steps:"
 	@echo "1. Edit .env with your API keys"
@@ -119,12 +130,25 @@ run-dev:
 mcp-register:
 	@echo "💃 Registering AngelaMCP with Claude Code..."
 	@if command -v claude >/dev/null 2>&1; then \
-		claude mcp add angelamcp -s project -- python -m src.mcp_server && \
+		claude mcp add angelamcp "$(PWD)/run-mcp.sh" && \
 		echo "✅ MCP server registered successfully" && \
 		echo "Test with: claude 'Use AngelaMCP to help with a task'"; \
 	else \
 		echo "❌ Claude Code not found. Install Claude Code first."; \
 		exit 1; \
+	fi
+
+# Clean up old MCP servers and register fresh
+mcp-clean-register:
+	@echo "🧹 Cleaning up old MCP servers..."
+	@if command -v claude >/dev/null 2>&1; then \
+		claude mcp remove angelamcp 2>/dev/null || true; \
+		claude mcp remove multi-ai-collab 2>/dev/null || true; \
+		chmod +x $(PWD)/run-mcp.sh; \
+		echo "✅ Old servers removed"; \
+		$(MAKE) mcp-register; \
+	else \
+		echo "❌ Claude Code not found"; \
 	fi
 
 # Test MCP integration
@@ -238,11 +262,21 @@ prod: run
 server: run-mcp
 
 # All-in-one commands for different use cases
-first-time: setup mcp-register
+first-time: setup
 	@echo "👻 First-time setup complete!"
 	@echo "Try: make run"
 
 quick-start: install verify run
+
+# Docker-only mode (databases in Docker, MCP on host)
+docker-mode: docker-up
+	@echo "🐳 Docker databases started"
+	@echo "Set environment: export CLAUDE_CODE_PATH=\"$$HOME/.claude/local/claude\""
+	@echo "Run MCP server: make run-mcp"
+
+# Everything in one command (recommended path)
+easy-setup: setup
+	@echo "🎉 AngelaMCP is ready!"
 
 # Backup and restore (for production)
 backup:
